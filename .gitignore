@@ -418,6 +418,6 @@ FodyWeavers.xsd
 *.msp
 
 # Build artifacts
-perlc
+/perlc
 *.s
 *.o
