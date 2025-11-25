@@ -64,11 +64,11 @@ func Get(pkgName string) *Stash {
 	// Create new stash
 	// Yeni stash oluştur
 	stashesMu.Lock()
-	defer stashesMu.Unlock()
 
 	// Double-check after acquiring write lock
 	// Yazma kilidi aldıktan sonra tekrar kontrol et
 	if s, ok = stashes[pkgName]; ok {
+		stashesMu.Unlock()
 		return s
 	}
 
@@ -77,16 +77,15 @@ func Get(pkgName string) *Stash {
 		symbols: make(map[string]*gv.GV),
 	}
 	stashes[pkgName] = s
+	stashesMu.Unlock() // Release lock BEFORE recursive call / Özyinelemeli çağrıdan ÖNCE kilidi bırak
 
-	// Register in parent stash (e.g., Foo::Bar:: in Foo::)
-	// Üst stash'e kaydet (örn., Foo::Bar:: Foo::'da)
+	// Register in parent stash (outside of lock to avoid deadlock)
+	// Üst stash'e kaydet (deadlock'u önlemek için kilidin dışında)
 	if idx := strings.LastIndex(pkgName, "::"); idx > 0 {
 		parent := pkgName[:idx]
 		child := pkgName[idx+2:] + "::"
-		Get(parent).FetchGV(child) // Creates the entry
+		Get(parent).FetchGV(child)
 	} else if pkgName != "main" {
-		// Top-level package, register in main::
-		// Üst düzey paket, main::'e kaydet
 		Get("main").FetchGV(pkgName + "::")
 	}
 

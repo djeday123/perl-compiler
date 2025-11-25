@@ -27,8 +27,8 @@ type GV struct {
 	hash   *sv.SV // %name (TypeHash)
 	code   *sv.SV // &name (TypeCode)
 	io     *sv.SV // Filehandle / Dosya tanıtıcı
-	format *sv.SV // Format (for write) / Format (write için)
-	flags  uint32
+	//format *sv.SV // Format (for write) / Format (write için)
+	//flags  uint32
 }
 
 // GV flags
