@@ -1,0 +1,21 @@
+perlc/
+├── cmd/perlc/              # Компилятор (AOT)
+├── pkg/
+│   ├── lexer/              # Токенизатор
+│   ├── parser/             # AST (полная грамматика Perl)
+│   ├── ast/
+│   ├── compiler/           # AST → IR → native
+│   └── optim/              # Оптимизации где возможно
+├── runtime/                # Линкуется в каждый бинарник
+│   ├── sv/                 # Scalar value operations
+│   ├── av/                 # Arrays
+│   ├── hv/                 # Hashes + stash
+│   ├── cv/                 # Code values
+│   ├── gv/                 # Globs (*foo)
+│   ├── gc/                 # Tracing GC
+│   ├── stash/              # Package symbol tables
+│   ├── regex/              # PCRE2 bindings или свой
+│   ├── unicode/            # Unicode properties
+│   ├── eval/               # Встроенный компилятор!
+│   └── ops/                # Операции (как pp_* в perl)
+└── libperlrt/              # Runtime как .a/.so
