@@ -368,6 +368,38 @@ func TestVariableExpression(t *testing.T) {
 	}
 }
 
+func TestAssignmentStatement(t *testing.T) {
+	input := `$x = 42;`
+
+	l := lexer.New(input)
+	p := New(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	if len(program.Statements) != 1 {
+		t.Fatalf("program.Statements does not contain 1 statement. got=%d",
+			len(program.Statements))
+	}
+
+	stmt, ok := program.Statements[0].(*ast.AssignmentStatement)
+	if !ok {
+		t.Fatalf("program.Statements[0] is not *ast.AssignmentStatement. got=%T",
+			program.Statements[0])
+	}
+
+	if stmt.Name.Value != "x" {
+		t.Fatalf("stmt.Name.Value not 'x'. got=%s", stmt.Name.Value)
+	}
+
+	if stmt.Name.Sigil != "$" {
+		t.Fatalf("stmt.Name.Sigil not '$'. got=%s", stmt.Name.Sigil)
+	}
+
+	if stmt.Value == nil {
+		t.Fatal("stmt.Value is nil")
+	}
+}
+
 func checkParserErrors(t *testing.T, p *Parser) {
 	errors := p.Errors()
 	if len(errors) == 0 {

@@ -391,7 +391,7 @@ func (p *Parser) parseBlockStatement() *ast.BlockStatement {
 	return block
 }
 
-func (p *Parser) parseExpressionStatement() *ast.ExpressionStatement {
+func (p *Parser) parseExpressionStatement() ast.Statement {
 	stmt := &ast.ExpressionStatement{Token: p.curToken.Literal}
 
 	stmt.Expression = p.parseExpression(LOWEST)
@@ -410,10 +410,7 @@ func (p *Parser) parseExpressionStatement() *ast.ExpressionStatement {
 			if p.peekTokenIs(lexer.SEMICOLON) {
 				p.nextToken()
 			}
-			return &ast.ExpressionStatement{
-				Token:      assignStmt.Token,
-				Expression: nil,
-			}
+			return assignStmt
 		}
 	}
 
