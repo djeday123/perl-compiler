@@ -3,8 +3,8 @@ package codegen
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/djeday123/perl-compiler/pkg/ast"
 )
@@ -695,11 +695,9 @@ func (g *Generator) generateTernaryExpression(expr *ast.TernaryExpression) {
 
 // Helper functions
 
-// floatToBits converts a float64 to its bit representation.
+// floatToBits converts a float64 to its IEEE 754 bit representation.
 func floatToBits(f float64) uint64 {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(f))
-	return binary.LittleEndian.Uint64(buf[:])
+	return math.Float64bits(f)
 }
 
 // escapeString escapes special characters in a string for assembly.
