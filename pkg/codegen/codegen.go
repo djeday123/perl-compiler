@@ -1,0 +1,1043 @@
+// Package codegen generates Go code from Perl AST.
+package codegen
+
+import (
+	"fmt"
+	"strings"
+
+	"perlc/pkg/ast"
+)
+
+// Generator generates Go code from AST.
+type Generator struct {
+	output strings.Builder
+	indent int
+	//varCount  int
+	tempCount int
+}
+
+// New creates a new Generator.
+func New() *Generator {
+	return &Generator{}
+}
+
+// Generate generates Go code from a program.
+func (g *Generator) Generate(program *ast.Program) string {
+	g.output.Reset()
+
+	// Header
+	g.writeln("package main")
+	g.writeln("")
+	g.writeln("import (")
+	g.indent++
+	g.writeln(`"fmt"`)
+	g.writeln(`"math"`)
+	g.writeln(`"regexp"`)
+	g.writeln(`"strings"`)
+	g.indent--
+	g.writeln(")")
+	g.writeln("")
+
+	// Suppress unused import errors
+	g.writeln("var _ = fmt.Sprint")
+	g.writeln("var _ = strings.Join")
+	g.writeln("var _ = math.Abs")
+	g.writeln("var _ = regexp.Compile")
+	g.writeln("")
+
+	// Runtime types and functions
+	g.writeRuntime()
+
+	// Collect subroutine declarations first
+	var subs []*ast.SubDecl
+	var stmts []ast.Statement
+	for _, stmt := range program.Statements {
+		if sub, ok := stmt.(*ast.SubDecl); ok {
+			subs = append(subs, sub)
+		} else {
+			stmts = append(stmts, stmt)
+		}
+	}
+
+	// Generate subroutines as Go functions
+	for _, sub := range subs {
+		g.generateSubDecl(sub)
+		g.writeln("")
+	}
+
+	// Generate main function
+	g.writeln("func main() {")
+	g.indent++
+
+	for _, stmt := range stmts {
+		g.generateStatement(stmt)
+	}
+
+	g.indent--
+	g.writeln("}")
+
+	return g.output.String()
+}
+
+func (g *Generator) writeRuntime() {
+	g.writeln("// ============ Runtime ============")
+	g.writeln("")
+
+	// SV type
+	g.writeln("type SV struct {")
+	g.indent++
+	g.writeln("iv    int64")
+	g.writeln("nv    float64")
+	g.writeln("pv    string")
+	g.writeln("av    []*SV")
+	g.writeln("hv    map[string]*SV")
+	g.writeln("flags uint8")
+	g.indent--
+	g.writeln("}")
+	g.writeln("")
+
+	g.writeln("const (")
+	g.indent++
+	g.writeln("SVf_IOK uint8 = 1 << iota")
+	g.writeln("SVf_NOK")
+	g.writeln("SVf_POK")
+	g.writeln("SVf_AOK")
+	g.writeln("SVf_HOK")
+	g.indent--
+	g.writeln(")")
+	g.writeln("")
+
+	// Constructors
+	g.writeln("func svInt(i int64) *SV { return &SV{iv: i, flags: SVf_IOK} }")
+	g.writeln("func svFloat(f float64) *SV { return &SV{nv: f, flags: SVf_NOK} }")
+	g.writeln("func svStr(s string) *SV { return &SV{pv: s, flags: SVf_POK} }")
+	g.writeln("func svUndef() *SV { return &SV{} }")
+	g.writeln("func svArray(elems ...*SV) *SV { return &SV{av: elems, flags: SVf_AOK} }")
+	g.writeln("func svHash() *SV { return &SV{hv: make(map[string]*SV), flags: SVf_HOK} }")
+	g.writeln("")
+
+	// Converters
+	g.writeln(`func (sv *SV) AsInt() int64 {
+	if sv == nil { return 0 }
+	if sv.flags&SVf_IOK != 0 { return sv.iv }
+	if sv.flags&SVf_NOK != 0 { return int64(sv.nv) }
+	if sv.flags&SVf_POK != 0 { 
+		var i int64
+		fmt.Sscanf(sv.pv, "%d", &i)
+		return i
+	}
+	return 0
+}`)
+	g.writeln("")
+
+	g.writeln(`func (sv *SV) AsFloat() float64 {
+	if sv == nil { return 0 }
+	if sv.flags&SVf_NOK != 0 { return sv.nv }
+	if sv.flags&SVf_IOK != 0 { return float64(sv.iv) }
+	if sv.flags&SVf_POK != 0 {
+		var f float64
+		fmt.Sscanf(sv.pv, "%f", &f)
+		return f
+	}
+	return 0
+}`)
+	g.writeln("")
+
+	g.writeln(`func (sv *SV) AsString() string {
+	if sv == nil { return "" }
+	if sv.flags&SVf_POK != 0 { return sv.pv }
+	if sv.flags&SVf_IOK != 0 { return fmt.Sprintf("%d", sv.iv) }
+	if sv.flags&SVf_NOK != 0 { 
+		if sv.nv == float64(int64(sv.nv)) {
+			return fmt.Sprintf("%d", int64(sv.nv))
+		}
+		return fmt.Sprintf("%g", sv.nv)
+	}
+	return ""
+}`)
+	g.writeln("")
+
+	g.writeln(`func (sv *SV) IsTrue() bool {
+	if sv == nil { return false }
+	if sv.flags&SVf_IOK != 0 { return sv.iv != 0 }
+	if sv.flags&SVf_NOK != 0 { return sv.nv != 0 }
+	if sv.flags&SVf_POK != 0 { return sv.pv != "" && sv.pv != "0" }
+	if sv.flags&SVf_AOK != 0 { return len(sv.av) > 0 }
+	if sv.flags&SVf_HOK != 0 { return len(sv.hv) > 0 }
+	return false
+}`)
+	g.writeln("")
+
+	// Operations
+	g.writeln(`func svAdd(a, b *SV) *SV { 
+	if a.flags&SVf_IOK != 0 && b.flags&SVf_IOK != 0 {
+		return svInt(a.iv + b.iv)
+	}
+	return svFloat(a.AsFloat() + b.AsFloat()) 
+}`)
+
+	g.writeln(`func svSub(a, b *SV) *SV {
+	if a.flags&SVf_IOK != 0 && b.flags&SVf_IOK != 0 {
+		return svInt(a.iv - b.iv)
+	}
+	return svFloat(a.AsFloat() - b.AsFloat())
+}`)
+
+	g.writeln(`func svMul(a, b *SV) *SV {
+	if a.flags&SVf_IOK != 0 && b.flags&SVf_IOK != 0 {
+		return svInt(a.iv * b.iv)
+	}
+	return svFloat(a.AsFloat() * b.AsFloat())
+}`)
+
+	g.writeln("func svDiv(a, b *SV) *SV { return svFloat(a.AsFloat() / b.AsFloat()) }")
+	g.writeln("func svMod(a, b *SV) *SV { return svInt(a.AsInt() % b.AsInt()) }")
+	g.writeln("func svPow(a, b *SV) *SV { return svFloat(math.Pow(a.AsFloat(), b.AsFloat())) }")
+	g.writeln("func svConcat(a, b *SV) *SV { return svStr(a.AsString() + b.AsString()) }")
+	g.writeln("func svRepeat(s, n *SV) *SV { return svStr(strings.Repeat(s.AsString(), int(n.AsInt()))) }")
+	g.writeln("func svNeg(a *SV) *SV { return svFloat(-a.AsFloat()) }")
+	g.writeln("func svNot(a *SV) *SV { if a.IsTrue() { return svInt(0) }; return svInt(1) }")
+	g.writeln("")
+
+	// Comparisons
+	g.writeln("func svNumEq(a, b *SV) *SV { if a.AsFloat() == b.AsFloat() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svNumNe(a, b *SV) *SV { if a.AsFloat() != b.AsFloat() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svNumLt(a, b *SV) *SV { if a.AsFloat() < b.AsFloat() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svNumLe(a, b *SV) *SV { if a.AsFloat() <= b.AsFloat() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svNumGt(a, b *SV) *SV { if a.AsFloat() > b.AsFloat() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svNumGe(a, b *SV) *SV { if a.AsFloat() >= b.AsFloat() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svStrEq(a, b *SV) *SV { if a.AsString() == b.AsString() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svStrNe(a, b *SV) *SV { if a.AsString() != b.AsString() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svStrLt(a, b *SV) *SV { if a.AsString() < b.AsString() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svStrLe(a, b *SV) *SV { if a.AsString() <= b.AsString() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svStrGt(a, b *SV) *SV { if a.AsString() > b.AsString() { return svInt(1) }; return svInt(0) }")
+	g.writeln("func svStrGe(a, b *SV) *SV { if a.AsString() >= b.AsString() { return svInt(1) }; return svInt(0) }")
+	g.writeln("")
+
+	// Array ops
+	g.writeln(`func svAGet(arr *SV, idx *SV) *SV {
+	if arr == nil || arr.flags&SVf_AOK == 0 { return svUndef() }
+	i := int(idx.AsInt())
+	if i < 0 { i = len(arr.av) + i }
+	if i < 0 || i >= len(arr.av) { return svUndef() }
+	return arr.av[i]
+}`)
+	g.writeln("")
+
+	g.writeln(`func svASet(arr *SV, idx *SV, val *SV) *SV {
+	if arr == nil { return val }
+	i := int(idx.AsInt())
+	for len(arr.av) <= i { arr.av = append(arr.av, svUndef()) }
+	arr.av[i] = val
+	return val
+}`)
+	g.writeln("")
+
+	g.writeln(`func svPush(arr *SV, vals ...*SV) *SV {
+	arr.av = append(arr.av, vals...)
+	return svInt(int64(len(arr.av)))
+}`)
+	g.writeln("")
+
+	g.writeln(`func svPop(arr *SV) *SV {
+	if len(arr.av) == 0 { return svUndef() }
+	val := arr.av[len(arr.av)-1]
+	arr.av = arr.av[:len(arr.av)-1]
+	return val
+}`)
+	g.writeln("")
+
+	g.writeln(`func svShift(arr *SV) *SV {
+	if len(arr.av) == 0 { return svUndef() }
+	val := arr.av[0]
+	arr.av = arr.av[1:]
+	return val
+}`)
+	g.writeln("")
+
+	g.writeln(`func svUnshift(arr *SV, vals ...*SV) *SV {
+	arr.av = append(vals, arr.av...)
+	return svInt(int64(len(arr.av)))
+}`)
+	g.writeln("")
+
+	// Hash ops
+	g.writeln(`func svHGet(h *SV, key *SV) *SV {
+	if h == nil || h.hv == nil { return svUndef() }
+	if v, ok := h.hv[key.AsString()]; ok { return v }
+	return svUndef()
+}`)
+	g.writeln("")
+
+	g.writeln(`func svHSet(h *SV, key *SV, val *SV) *SV {
+	if h.hv == nil { h.hv = make(map[string]*SV); h.flags |= SVf_HOK }
+	h.hv[key.AsString()] = val
+	return val
+}`)
+	g.writeln("")
+
+	// Builtins
+	g.writeln(`func perlPrint(args ...*SV) *SV {
+	for _, a := range args { fmt.Print(a.AsString()) }
+	return svInt(1)
+}`)
+	g.writeln("")
+
+	g.writeln(`func perlSay(args ...*SV) *SV {
+	for _, a := range args { fmt.Print(a.AsString()) }
+	fmt.Println()
+	return svInt(1)
+}`)
+	g.writeln("")
+
+	g.writeln(`func perlLength(s *SV) *SV { return svInt(int64(len(s.AsString()))) }`)
+	g.writeln(`func perlUc(s *SV) *SV { return svStr(strings.ToUpper(s.AsString())) }`)
+	g.writeln(`func perlLc(s *SV) *SV { return svStr(strings.ToLower(s.AsString())) }`)
+	g.writeln(`func perlAbs(n *SV) *SV { return svFloat(math.Abs(n.AsFloat())) }`)
+	g.writeln(`func perlInt(n *SV) *SV { return svInt(n.AsInt()) }`)
+	g.writeln(`func perlSqrt(n *SV) *SV { return svFloat(math.Sqrt(n.AsFloat())) }`)
+	g.writeln(`func perlChr(n *SV) *SV { return svStr(string(rune(n.AsInt()))) }`)
+	g.writeln(`func perlOrd(s *SV) *SV { r := []rune(s.AsString()); if len(r) > 0 { return svInt(int64(r[0])) }; return svUndef() }`)
+	g.writeln("")
+
+	g.writeln("// ============ End Runtime ============")
+	g.writeln("")
+}
+
+func (g *Generator) write(s string) {
+	g.output.WriteString(s)
+}
+
+func (g *Generator) writeln(s string) {
+	for i := 0; i < g.indent; i++ {
+		g.output.WriteString("\t")
+	}
+	g.output.WriteString(s)
+	g.output.WriteString("\n")
+}
+
+func (g *Generator) generateStatement(stmt ast.Statement) {
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		g.write(strings.Repeat("\t", g.indent))
+		g.generateExpression(s.Expression)
+		g.write("\n")
+	case *ast.VarDecl:
+		g.generateVarDecl(s)
+	case *ast.IfStmt:
+		g.generateIfStmt(s)
+	case *ast.WhileStmt:
+		g.generateWhileStmt(s)
+	case *ast.ForStmt:
+		g.generateForStmt(s)
+	case *ast.ForeachStmt:
+		g.generateForeachStmt(s)
+	case *ast.BlockStmt:
+		g.generateBlockStmt(s)
+	case *ast.ReturnStmt:
+		g.generateReturnStmt(s)
+	case *ast.LastStmt:
+		g.writeln("break")
+	case *ast.NextStmt:
+		g.writeln("continue")
+	case *ast.SubDecl:
+		// Already handled at top level
+	case *ast.UseDecl:
+		// Ignore for now
+	case *ast.PackageDecl:
+		// Ignore for now
+	}
+}
+
+func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
+	// Single value case
+	if len(decl.Names) == 1 {
+		name := g.varName(decl.Names[0])
+		g.write(strings.Repeat("\t", g.indent))
+		if decl.Value != nil {
+			g.write(name + " := ")
+			g.generateExpression(decl.Value)
+		} else {
+			g.write(name + " := svUndef()")
+		}
+		g.write("\n")
+		g.writeln("_ = " + name)
+		return
+	}
+
+	// Multiple names - need to handle array assignment
+	for i, v := range decl.Names {
+		name := g.varName(v)
+		g.write(strings.Repeat("\t", g.indent))
+		g.write(name + " := svUndef()")
+		g.write("\n")
+		g.writeln("_ = " + name)
+		_ = i
+	}
+}
+
+func (g *Generator) generateSubDecl(sub *ast.SubDecl) {
+	g.write("func perl_" + sub.Name + "(args ...*SV) *SV {\n")
+	g.indent++
+	g.writeln("_ = args")
+
+	// Generate body
+	for _, stmt := range sub.Body.Statements {
+		g.generateStatement(stmt)
+	}
+
+	g.writeln("return svUndef()")
+	g.indent--
+	g.writeln("}")
+}
+
+func (g *Generator) generateIfStmt(stmt *ast.IfStmt) {
+	g.write(strings.Repeat("\t", g.indent))
+	if stmt.Unless {
+		g.write("if !(")
+	} else {
+		g.write("if (")
+	}
+	g.generateExpression(stmt.Condition)
+	g.write(").IsTrue() {\n")
+	g.indent++
+	for _, s := range stmt.Then.Statements {
+		g.generateStatement(s)
+	}
+	g.indent--
+
+	for _, elsif := range stmt.Elsif {
+		g.write(strings.Repeat("\t", g.indent))
+		g.write("} else if (")
+		g.generateExpression(elsif.Condition)
+		g.write(").IsTrue() {\n")
+		g.indent++
+		for _, s := range elsif.Body.Statements {
+			g.generateStatement(s)
+		}
+		g.indent--
+	}
+
+	if stmt.Else != nil {
+		g.writeln("} else {")
+		g.indent++
+		for _, s := range stmt.Else.Statements {
+			g.generateStatement(s)
+		}
+		g.indent--
+	}
+	g.writeln("}")
+}
+
+func (g *Generator) generateWhileStmt(stmt *ast.WhileStmt) {
+	g.write(strings.Repeat("\t", g.indent))
+	g.write("for (")
+	g.generateExpression(stmt.Condition)
+	g.write(").IsTrue() {\n")
+	g.indent++
+	for _, s := range stmt.Body.Statements {
+		g.generateStatement(s)
+	}
+	g.indent--
+	g.writeln("}")
+}
+
+func (g *Generator) generateForStmt(stmt *ast.ForStmt) {
+	g.write(strings.Repeat("\t", g.indent))
+	g.write("for ")
+
+	// Init
+	if stmt.Init != nil {
+		if decl, ok := stmt.Init.(*ast.VarDecl); ok && len(decl.Names) > 0 {
+			name := g.varName(decl.Names[0])
+			g.write(name + " := ")
+			if decl.Value != nil {
+				g.generateExpression(decl.Value)
+			} else {
+				g.write("svUndef()")
+			}
+		}
+	}
+	g.write("; ")
+
+	// Condition
+	if stmt.Condition != nil {
+		g.write("(")
+		g.generateExpression(stmt.Condition)
+		g.write(").IsTrue()")
+	}
+	g.write("; ")
+
+	// Post
+	if stmt.Post != nil {
+		g.generateExpression(stmt.Post)
+	}
+
+	g.write(" {\n")
+	g.indent++
+	for _, s := range stmt.Body.Statements {
+		g.generateStatement(s)
+	}
+	g.indent--
+	g.writeln("}")
+}
+func (g *Generator) generateForeachStmt(stmt *ast.ForeachStmt) {
+	iterVar := g.varName(stmt.Variable)
+	g.tempCount++
+	listVar := fmt.Sprintf("_list%d", g.tempCount)
+	idxVar := fmt.Sprintf("_i%d", g.tempCount)
+
+	g.write(strings.Repeat("\t", g.indent))
+	g.write(listVar + " := ")
+	g.generateExpression(stmt.List)
+	g.write("\n")
+
+	g.writeln(fmt.Sprintf("for %s := 0; %s < len(%s.av); %s++ {", idxVar, idxVar, listVar, idxVar))
+	g.indent++
+	g.writeln(fmt.Sprintf("%s := %s.av[%s]", iterVar, listVar, idxVar))
+	g.writeln("_ = " + iterVar)
+	for _, s := range stmt.Body.Statements {
+		g.generateStatement(s)
+	}
+	g.indent--
+	g.writeln("}")
+}
+
+func (g *Generator) generateBlockStmt(stmt *ast.BlockStmt) {
+	g.writeln("{")
+	g.indent++
+	for _, s := range stmt.Statements {
+		g.generateStatement(s)
+	}
+	g.indent--
+	g.writeln("}")
+}
+
+func (g *Generator) generateReturnStmt(stmt *ast.ReturnStmt) {
+	g.write(strings.Repeat("\t", g.indent))
+	g.write("return ")
+	if stmt.Value != nil {
+		g.generateExpression(stmt.Value)
+	} else {
+		g.write("svUndef()")
+	}
+	g.write("\n")
+}
+
+func (g *Generator) generateExpression(expr ast.Expression) {
+	switch e := expr.(type) {
+	case *ast.IntegerLiteral:
+		g.write(fmt.Sprintf("svInt(%d)", e.Value))
+	case *ast.FloatLiteral:
+		g.write(fmt.Sprintf("svFloat(%f)", e.Value))
+	case *ast.StringLiteral:
+		if e.Interpolated {
+			g.generateInterpolatedString(e.Value)
+		} else {
+			g.write(fmt.Sprintf("svStr(%q)", e.Value))
+		}
+	case *ast.ScalarVar:
+		g.write(g.scalarName(e.Name))
+	case *ast.ArrayVar:
+		g.write(g.arrayName(e.Name))
+	case *ast.HashVar:
+		g.write(g.hashName(e.Name))
+	case *ast.PrefixExpr:
+		g.generatePrefixExpr(e)
+	case *ast.PostfixExpr:
+		g.generatePostfixExpr(e)
+	case *ast.InfixExpr:
+		g.generateInfixExpr(e)
+	case *ast.AssignExpr:
+		g.generateAssignExpr(e)
+	case *ast.TernaryExpr:
+		g.write("func() *SV { if (")
+		g.generateExpression(e.Condition)
+		g.write(").IsTrue() { return ")
+		g.generateExpression(e.Then)
+		g.write(" } else { return ")
+		g.generateExpression(e.Else)
+		g.write(" } }()")
+	case *ast.CallExpr:
+		g.generateCallExpr(e)
+	case *ast.ArrayExpr:
+		g.write("svArray(")
+		for i, el := range e.Elements {
+			if i > 0 {
+				g.write(", ")
+			}
+			g.generateExpression(el)
+		}
+		g.write(")")
+	case *ast.HashExpr:
+		g.tempCount++
+		hvar := fmt.Sprintf("_h%d", g.tempCount)
+		g.write("func() *SV { " + hvar + " := svHash(); ")
+		for _, p := range e.Pairs {
+			g.write("svHSet(" + hvar + ", ")
+			g.generateExpression(p.Key)
+			g.write(", ")
+			g.generateExpression(p.Value)
+			g.write("); ")
+		}
+		g.write("return " + hvar + " }()")
+	case *ast.ArrayAccess:
+		g.write("svAGet(")
+		g.generateExpression(e.Array)
+		g.write(", ")
+		g.generateExpression(e.Index)
+		g.write(")")
+	case *ast.HashAccess:
+		g.write("svHGet(")
+		g.generateExpression(e.Hash)
+		g.write(", ")
+		g.generateExpression(e.Key)
+		g.write(")")
+	case *ast.ArrowAccess:
+		g.generateArrowAccess(e)
+	case *ast.Identifier:
+		g.write(fmt.Sprintf("svStr(%q)", e.Value))
+	case *ast.RangeExpr:
+		g.generateRangeExpr(e)
+	case *ast.UndefLiteral:
+		g.write("svUndef()")
+	case *ast.MatchExpr:
+		g.generateMatchExpr(e)
+	case *ast.SubstExpr:
+		g.generateSubstExpr(e)
+	default:
+		g.write("svUndef()")
+	}
+}
+
+func (g *Generator) generatePrefixExpr(expr *ast.PrefixExpr) {
+	switch expr.Operator {
+	case "-":
+		g.write("svNeg(")
+		g.generateExpression(expr.Right)
+		g.write(")")
+	case "!":
+		g.write("svNot(")
+		g.generateExpression(expr.Right)
+		g.write(")")
+	case "not":
+		g.write("svNot(")
+		g.generateExpression(expr.Right)
+		g.write(")")
+	case "++":
+		// Pre-increment
+		if v, ok := expr.Right.(*ast.ScalarVar); ok {
+			name := g.scalarName(v.Name)
+			g.write("func() *SV { " + name + " = svAdd(" + name + ", svInt(1)); return " + name + " }()")
+		}
+	case "--":
+		if v, ok := expr.Right.(*ast.ScalarVar); ok {
+			name := g.scalarName(v.Name)
+			g.write("func() *SV { " + name + " = svSub(" + name + ", svInt(1)); return " + name + " }()")
+		}
+	default:
+		g.generateExpression(expr.Right)
+	}
+}
+
+func (g *Generator) generatePostfixExpr(expr *ast.PostfixExpr) {
+	switch expr.Operator {
+	case "++":
+		if v, ok := expr.Left.(*ast.ScalarVar); ok {
+			name := g.scalarName(v.Name)
+			g.write("func() *SV { _t := " + name + "; " + name + " = svAdd(" + name + ", svInt(1)); return _t }()")
+		}
+	case "--":
+		if v, ok := expr.Left.(*ast.ScalarVar); ok {
+			name := g.scalarName(v.Name)
+			g.write("func() *SV { _t := " + name + "; " + name + " = svSub(" + name + ", svInt(1)); return _t }()")
+		}
+	}
+}
+
+func (g *Generator) generateInfixExpr(expr *ast.InfixExpr) {
+	op := expr.Operator
+	switch op {
+	case "+":
+		g.write("svAdd(")
+	case "-":
+		g.write("svSub(")
+	case "*":
+		g.write("svMul(")
+	case "/":
+		g.write("svDiv(")
+	case "%":
+		g.write("svMod(")
+	case "**":
+		g.write("svPow(")
+	case ".":
+		g.write("svConcat(")
+	case "x":
+		g.write("svRepeat(")
+	case "==":
+		g.write("svNumEq(")
+	case "!=":
+		g.write("svNumNe(")
+	case "<":
+		g.write("svNumLt(")
+	case "<=":
+		g.write("svNumLe(")
+	case ">":
+		g.write("svNumGt(")
+	case ">=":
+		g.write("svNumGe(")
+	case "eq":
+		g.write("svStrEq(")
+	case "ne":
+		g.write("svStrNe(")
+	case "lt":
+		g.write("svStrLt(")
+	case "le":
+		g.write("svStrLe(")
+	case "gt":
+		g.write("svStrGt(")
+	case "ge":
+		g.write("svStrGe(")
+	case "&&", "and":
+		g.write("func() *SV { if (")
+		g.generateExpression(expr.Left)
+		g.write(").IsTrue() { return ")
+		g.generateExpression(expr.Right)
+		g.write(" }; return svInt(0) }()")
+		return
+	case "||", "or":
+		g.write("func() *SV { if _v := ")
+		g.generateExpression(expr.Left)
+		g.write("; _v.IsTrue() { return _v }; return ")
+		g.generateExpression(expr.Right)
+		g.write(" }()")
+		return
+	case "//":
+		g.write("func() *SV { if _v := ")
+		g.generateExpression(expr.Left)
+		g.write("; _v != nil && _v.flags != 0 { return _v }; return ")
+		g.generateExpression(expr.Right)
+		g.write(" }()")
+		return
+	default:
+		g.write("svUndef(")
+	}
+	g.generateExpression(expr.Left)
+	g.write(", ")
+	g.generateExpression(expr.Right)
+	g.write(")")
+}
+
+func (g *Generator) generateAssignExpr(expr *ast.AssignExpr) {
+	switch left := expr.Left.(type) {
+	case *ast.ScalarVar:
+		name := g.scalarName(left.Name)
+		switch expr.Operator {
+		case "=":
+			g.write(name + " = ")
+			g.generateExpression(expr.Right)
+		case "+=":
+			g.write(name + " = svAdd(" + name + ", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		case "-=":
+			g.write(name + " = svSub(" + name + ", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		case "*=":
+			g.write(name + " = svMul(" + name + ", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		case "/=":
+			g.write(name + " = svDiv(" + name + ", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		case ".=":
+			g.write(name + " = svConcat(" + name + ", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		}
+	case *ast.ArrayAccess:
+		g.write("svASet(")
+		g.generateExpression(left.Array)
+		g.write(", ")
+		g.generateExpression(left.Index)
+		g.write(", ")
+		g.generateExpression(expr.Right)
+		g.write(")")
+	case *ast.HashAccess:
+		g.write("svHSet(")
+		g.generateExpression(left.Hash)
+		g.write(", ")
+		g.generateExpression(left.Key)
+		g.write(", ")
+		g.generateExpression(expr.Right)
+		g.write(")")
+	}
+}
+
+func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
+	if ident, ok := expr.Function.(*ast.Identifier); ok {
+		name := ident.Value
+		switch name {
+		case "print":
+			g.write("perlPrint(")
+			for i, a := range expr.Args {
+				if i > 0 {
+					g.write(", ")
+				}
+				g.generateExpression(a)
+			}
+			g.write(")")
+		case "say":
+			g.write("perlSay(")
+			for i, a := range expr.Args {
+				if i > 0 {
+					g.write(", ")
+				}
+				g.generateExpression(a)
+			}
+			g.write(")")
+		case "push":
+			if len(expr.Args) >= 1 {
+				if av, ok := expr.Args[0].(*ast.ArrayVar); ok {
+					g.write("svPush(" + g.arrayName(av.Name))
+					for _, a := range expr.Args[1:] {
+						g.write(", ")
+						g.generateExpression(a)
+					}
+					g.write(")")
+					return
+				}
+			}
+			g.write("svUndef()")
+		case "pop":
+			if len(expr.Args) >= 1 {
+				if av, ok := expr.Args[0].(*ast.ArrayVar); ok {
+					g.write("svPop(" + g.arrayName(av.Name) + ")")
+					return
+				}
+			}
+			g.write("svUndef()")
+		case "shift":
+			if len(expr.Args) >= 1 {
+				if av, ok := expr.Args[0].(*ast.ArrayVar); ok {
+					g.write("svShift(" + g.arrayName(av.Name) + ")")
+					return
+				}
+			}
+			g.write("svShift(svArray(args...))")
+		case "unshift":
+			if len(expr.Args) >= 1 {
+				if av, ok := expr.Args[0].(*ast.ArrayVar); ok {
+					g.write("svUnshift(" + g.arrayName(av.Name))
+					for _, a := range expr.Args[1:] {
+						g.write(", ")
+						g.generateExpression(a)
+					}
+					g.write(")")
+					return
+				}
+			}
+			g.write("svUndef()")
+		case "length":
+			if len(expr.Args) >= 1 {
+				g.write("perlLength(")
+				g.generateExpression(expr.Args[0])
+				g.write(")")
+			} else {
+				g.write("svInt(0)")
+			}
+		case "uc":
+			g.write("perlUc(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		case "lc":
+			g.write("perlLc(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		case "abs":
+			g.write("perlAbs(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		case "int":
+			g.write("perlInt(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		case "sqrt":
+			g.write("perlSqrt(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		case "chr":
+			g.write("perlChr(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		case "ord":
+			g.write("perlOrd(")
+			g.generateExpression(expr.Args[0])
+			g.write(")")
+		default:
+			// User-defined function
+			g.write("perl_" + name + "(")
+			for i, a := range expr.Args {
+				if i > 0 {
+					g.write(", ")
+				}
+				g.generateExpression(a)
+			}
+			g.write(")")
+		}
+	}
+}
+
+func (g *Generator) generateArrowAccess(expr *ast.ArrowAccess) {
+	switch right := expr.Right.(type) {
+	case *ast.ArrayAccess:
+		g.write("svAGet(")
+		g.generateExpression(expr.Left)
+		g.write(", ")
+		g.generateExpression(right.Index)
+		g.write(")")
+	case *ast.HashAccess:
+		g.write("svHGet(")
+		g.generateExpression(expr.Left)
+		g.write(", ")
+		g.generateExpression(right.Key)
+		g.write(")")
+	default:
+		g.generateExpression(expr.Left)
+	}
+}
+
+func (g *Generator) generateRangeExpr(expr *ast.RangeExpr) {
+	g.write("func() *SV { var _r []*SV; for _i := int(")
+	g.generateExpression(expr.Start)
+	g.write(".AsInt()); _i <= int(")
+	g.generateExpression(expr.End)
+	g.write(".AsInt()); _i++ { _r = append(_r, svInt(int64(_i))) }; return svArray(_r...) }()")
+}
+
+func (g *Generator) generateInterpolatedString(s string) {
+	// Build concatenation expression
+	g.write("func() *SV { var _s string; ")
+
+	i := 0
+	for i < len(s) {
+		if s[i] == '$' {
+			// Find variable name
+			j := i + 1
+			if j < len(s) && s[j] == '{' {
+				// ${var}
+				k := j + 1
+				for k < len(s) && s[k] != '}' {
+					k++
+				}
+				varName := s[j+1 : k]
+				g.write("_s += " + g.scalarName(varName) + ".AsString(); ")
+				i = k + 1
+			} else {
+				// $var
+				for j < len(s) && (isAlnum(s[j]) || s[j] == '_') {
+					j++
+				}
+				varName := s[i+1 : j]
+				if varName != "" {
+					g.write("_s += " + g.scalarName(varName) + ".AsString(); ")
+				}
+				i = j
+			}
+		} else {
+			// Literal text
+			j := i
+			for j < len(s) && s[j] != '$' {
+				j++
+			}
+			g.write(fmt.Sprintf("_s += %q; ", s[i:j]))
+			i = j
+		}
+	}
+
+	g.write("return svStr(_s) }()")
+}
+
+func (g *Generator) generateMatchExpr(expr *ast.MatchExpr) {
+	pattern := expr.Pattern.Pattern
+	flags := expr.Pattern.Flags
+
+	// Add case-insensitive flag if needed
+	rePattern := pattern
+	if strings.Contains(flags, "i") {
+		rePattern = "(?i)" + rePattern
+	}
+
+	if expr.Negate {
+		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); if re.MatchString(")
+		g.generateExpression(expr.Target)
+		g.write(".AsString()) { return svInt(0) }; return svInt(1) }()")
+	} else {
+		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); if re.MatchString(")
+		g.generateExpression(expr.Target)
+		g.write(".AsString()) { return svInt(1) }; return svInt(0) }()")
+	}
+}
+
+func (g *Generator) varName(expr ast.Expression) string {
+	switch v := expr.(type) {
+	case *ast.ScalarVar:
+		return "v_" + v.Name
+	case *ast.ArrayVar:
+		return "a_" + v.Name
+	case *ast.HashVar:
+		return "h_" + v.Name
+	}
+	return "_"
+}
+
+func (g *Generator) scalarName(name string) string {
+	return "v_" + name
+}
+
+func (g *Generator) arrayName(name string) string {
+	return "a_" + name
+}
+
+func (g *Generator) hashName(name string) string {
+	return "h_" + name
+}
+
+func (g *Generator) generateSubstExpr(expr *ast.SubstExpr) {
+	pattern := expr.Pattern
+	replacement := expr.Replacement
+	flags := expr.Flags
+
+	rePattern := pattern
+	if strings.Contains(flags, "i") {
+		rePattern = "(?i)" + rePattern
+	}
+
+	// Get variable name
+	varName := ""
+	if v, ok := expr.Target.(*ast.ScalarVar); ok {
+		varName = g.scalarName(v.Name)
+	}
+
+	if strings.Contains(flags, "g") {
+		// Global replace
+		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); ")
+		g.write("_old := " + varName + ".AsString(); ")
+		g.write("_new := re.ReplaceAllString(_old, `" + replacement + "`); ")
+		g.write(varName + " = svStr(_new); ")
+		g.write("if _old != _new { return svInt(1) }; return svInt(0) }()")
+	} else {
+		// Single replace
+		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); ")
+		g.write("_old := " + varName + ".AsString(); ")
+		g.write("_loc := re.FindStringIndex(_old); ")
+		g.write("if _loc != nil { " + varName + " = svStr(_old[:_loc[0]] + `" + replacement + "` + _old[_loc[1]:]); return svInt(1) }; ")
+		g.write("return svInt(0) }()")
+	}
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}

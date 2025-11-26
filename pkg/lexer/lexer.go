@@ -218,6 +218,10 @@ func (l *Lexer) NextToken() Token {
 	default:
 		if isDigit(l.ch) {
 			tok = l.readNumber()
+		} else if l.ch == 's' && l.peekChar() == '/' {
+			tok = l.readSubst()
+		} else if l.ch == 'm' && l.peekChar() == '/' {
+			tok = l.readMatchOp()
 		} else if isIdentStart(l.ch) {
 			tok = l.readIdentifier()
 		} else {
@@ -970,6 +974,64 @@ func (l *Lexer) expectRegex() bool {
 		return true
 	}
 	return false
+}
+
+func (l *Lexer) readSubst() Token {
+	tok := Token{Line: l.line, Column: l.column, File: l.file, Type: TokSubst}
+	l.readChar() // skip 's'
+	delim := l.ch
+	l.readChar() // skip opening delimiter
+
+	// Read pattern
+	var pattern strings.Builder
+	for l.ch != delim && l.ch != 0 {
+		if l.ch == '\\' {
+			pattern.WriteRune(l.ch)
+			l.readChar()
+			if l.ch != 0 {
+				pattern.WriteRune(l.ch)
+				l.readChar()
+			}
+		} else {
+			pattern.WriteRune(l.ch)
+			l.readChar()
+		}
+	}
+	l.readChar() // skip middle delimiter
+
+	// Read replacement
+	var replacement strings.Builder
+	for l.ch != delim && l.ch != 0 {
+		if l.ch == '\\' {
+			replacement.WriteRune(l.ch)
+			l.readChar()
+			if l.ch != 0 {
+				replacement.WriteRune(l.ch)
+				l.readChar()
+			}
+		} else {
+			replacement.WriteRune(l.ch)
+			l.readChar()
+		}
+	}
+	l.readChar() // skip closing delimiter
+
+	// Read flags
+	var flags strings.Builder
+	for l.ch == 'g' || l.ch == 'i' || l.ch == 'm' || l.ch == 's' || l.ch == 'x' || l.ch == 'e' {
+		flags.WriteRune(l.ch)
+		l.readChar()
+	}
+
+	// Format: pattern/replacement/flags
+	tok.Value = pattern.String() + "/" + replacement.String() + "/" + flags.String()
+	return tok
+}
+
+func (l *Lexer) readMatchOp() Token {
+	//tok := Token{Line: l.line, Column: l.column, File: l.file, Type: TokRegex}
+	l.readChar() // skip 'm'
+	return l.readRegex(l.ch)
 }
 
 // ============================================================

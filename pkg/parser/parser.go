@@ -300,6 +300,9 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerPrefix(lexer.TokWait, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokKill, p.parseBuiltinCall)
 
+	// Regex builtins
+	// p.registerInfix(lexer.TokSubst, p.parseSubstExpression)
+
 	// Read two tokens to initialize curToken and peekToken
 	// curToken ve peekToken'ı başlatmak için iki token oku
 	p.nextToken()
@@ -838,16 +841,48 @@ func (p *Parser) parseExpressionList(end lexer.TokenType) []ast.Expression {
 }
 
 func (p *Parser) parseMatchExpression(left ast.Expression) ast.Expression {
-	exp := &ast.MatchExpr{
-		Token:  p.curToken,
-		Target: left,
-		Negate: p.curToken.Type == lexer.TokNotMatch,
-	}
+	matchTok := p.curToken
+	negate := matchTok.Type == lexer.TokNotMatch
 	p.nextToken()
-	if p.curToken.Type == lexer.TokRegex {
-		exp.Pattern = p.parseRegexLiteral().(*ast.RegexLiteral)
+
+	// Handle s/pattern/replacement/flags
+	if p.curToken.Type == lexer.TokSubst {
+		tok := p.curToken
+		parts := strings.SplitN(tok.Value, "/", 3)
+		pattern := ""
+		replacement := ""
+		flags := ""
+		if len(parts) >= 1 {
+			pattern = parts[0]
+		}
+		if len(parts) >= 2 {
+			replacement = parts[1]
+		}
+		if len(parts) >= 3 {
+			flags = parts[2]
+		}
+
+		return &ast.SubstExpr{
+			Token:       tok,
+			Target:      left,
+			Pattern:     pattern,
+			Replacement: replacement,
+			Flags:       flags,
+		}
 	}
-	return exp
+
+	// Handle /pattern/flags
+	if p.curToken.Type == lexer.TokRegex {
+		exp := &ast.MatchExpr{
+			Token:  matchTok,
+			Target: left,
+			Negate: negate,
+		}
+		exp.Pattern = p.parseRegexLiteral().(*ast.RegexLiteral)
+		return exp
+	}
+
+	return nil
 }
 
 // ============================================================
@@ -1305,6 +1340,8 @@ func (p *Parser) parseForeachStyleFor(token lexer.Token) ast.Statement {
 	return stmt
 }
 
+var _ = (*Parser).parseForeachStyleFor
+
 func (p *Parser) parseForeachStmt() ast.Statement {
 	stmt := &ast.ForeachStmt{Token: p.curToken}
 
@@ -1422,4 +1459,32 @@ func (p *Parser) parseBuiltinCall() ast.Expression {
 	}
 
 	return exp
+}
+
+var _ = (*Parser).parseSubstExpression
+
+func (p *Parser) parseSubstExpression(left ast.Expression) ast.Expression {
+	tok := p.curToken
+	// Parse s/pattern/replacement/flags from token value
+	parts := strings.SplitN(tok.Value, "/", 3)
+	pattern := ""
+	replacement := ""
+	flags := ""
+	if len(parts) >= 1 {
+		pattern = parts[0]
+	}
+	if len(parts) >= 2 {
+		replacement = parts[1]
+	}
+	if len(parts) >= 3 {
+		flags = parts[2]
+	}
+
+	return &ast.SubstExpr{
+		Token:       tok,
+		Target:      left,
+		Pattern:     pattern,
+		Replacement: replacement,
+		Flags:       flags,
+	}
 }

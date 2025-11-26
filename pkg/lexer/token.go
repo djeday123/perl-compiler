@@ -253,6 +253,8 @@ const (
 	TokFork
 	TokWait
 	TokKill
+
+	TokSubst // s/pattern/replacement/
 )
 
 // Token represents a lexical token.

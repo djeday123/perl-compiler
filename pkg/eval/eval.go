@@ -4,6 +4,8 @@ package eval
 import (
 	"io"
 	"os"
+	"regexp"
+	"strings"
 
 	"perlc/pkg/ast"
 	"perlc/pkg/av"
@@ -27,6 +29,8 @@ func New() *Interpreter {
 		stderr: os.Stderr,
 	}
 }
+
+var interpolateRe = regexp.MustCompile(`\$(\w+)|\$\{(\w+)\}|@(\w+)`)
 
 // SetStdout sets the output writer.
 func (i *Interpreter) SetStdout(w io.Writer) {
@@ -328,6 +332,10 @@ func (i *Interpreter) evalExpression(expr ast.Expression) *sv.SV {
 		return i.evalRangeExpr(e)
 	case *ast.ArrowAccess:
 		return i.evalArrowAccess(e)
+	case *ast.MatchExpr:
+		return i.evalMatchExpr(e)
+	case *ast.SubstExpr:
+		return i.evalSubstExpr(e)
 	default:
 		return sv.NewUndef()
 	}
@@ -659,7 +667,32 @@ func (i *Interpreter) svToList(val *sv.SV) []*sv.SV {
 }
 
 func (i *Interpreter) interpolateString(s string) string {
-	return s
+	return interpolateRe.ReplaceAllStringFunc(s, func(match string) string {
+		var name string
+		if match[0] == '@' {
+			name = match[1:]
+			val := i.ctx.GetVar(name)
+			if val != nil && val.IsArray() {
+				elements := val.ArrayData()
+				parts := make([]string, len(elements))
+				for idx, el := range elements {
+					parts[idx] = el.AsString()
+				}
+				return strings.Join(parts, " ")
+			}
+			return ""
+		}
+		if strings.HasPrefix(match, "${") {
+			name = match[2 : len(match)-1]
+		} else {
+			name = match[1:]
+		}
+		val := i.ctx.GetVar(name)
+		if val != nil {
+			return val.AsString()
+		}
+		return ""
+	})
 }
 
 func (i *Interpreter) callUserSub(name string, args []*sv.SV) *sv.SV {
@@ -701,6 +734,86 @@ func (i *Interpreter) evalArrowAccess(expr *ast.ArrowAccess) *sv.SV {
 	default:
 		return sv.NewUndef()
 	}
+}
+
+func (i *Interpreter) evalMatchExpr(expr *ast.MatchExpr) *sv.SV {
+	target := i.evalExpression(expr.Target)
+	str := target.AsString()
+
+	pattern := expr.Pattern.Pattern
+	flags := expr.Pattern.Flags
+
+	// Build regex pattern with flags
+	rePattern := pattern
+	if strings.Contains(flags, "i") {
+		rePattern = "(?i)" + rePattern
+	}
+
+	re, err := regexp.Compile(rePattern)
+	if err != nil {
+		return sv.NewInt(0)
+	}
+
+	matched := re.MatchString(str)
+
+	if expr.Negate {
+		if matched {
+			return sv.NewInt(0)
+		}
+		return sv.NewInt(1)
+	}
+
+	if matched {
+		return sv.NewInt(1)
+	}
+	return sv.NewInt(0)
+}
+
+func (i *Interpreter) evalSubstExpr(expr *ast.SubstExpr) *sv.SV {
+	target := i.evalExpression(expr.Target)
+	str := target.AsString()
+
+	pattern := expr.Pattern
+	replacement := expr.Replacement
+	flags := expr.Flags
+
+	// Build regex with flags
+	rePattern := pattern
+	if strings.Contains(flags, "i") {
+		rePattern = "(?i)" + rePattern
+	}
+
+	re, err := regexp.Compile(rePattern)
+	if err != nil {
+		return sv.NewInt(0)
+	}
+
+	var result string
+	if strings.Contains(flags, "g") {
+		result = re.ReplaceAllString(str, replacement)
+	} else {
+		result = re.ReplaceAllStringFunc(str, func(match string) string {
+			// Only replace first occurrence
+			return replacement
+		})
+		// Actually simpler:
+		loc := re.FindStringIndex(str)
+		if loc != nil {
+			result = str[:loc[0]] + replacement + str[loc[1]:]
+		} else {
+			result = str
+		}
+	}
+
+	// Update the variable if it's a scalar
+	if v, ok := expr.Target.(*ast.ScalarVar); ok {
+		i.ctx.SetVar(v.Name, sv.NewString(result))
+	}
+
+	if result != str {
+		return sv.NewInt(1)
+	}
+	return sv.NewInt(0)
 }
 
 func boolToSV(b bool) *sv.SV {
