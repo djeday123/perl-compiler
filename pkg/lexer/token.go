@@ -185,10 +185,74 @@ const (
 	TokTied
 	TokWantarray
 	TokCaller
-	TokScalarKw // scalar (keyword, not sigil)
+
+	// scalar (keyword, not sigil)
+	// Özel
+	TokScalarKw
 	TokGiven
 	TokWhen
 	TokDefault
+
+	// Array/Hash functions
+	TokShift
+	TokUnshift
+	TokPop
+	TokPush
+	TokSplice
+	TokKeys
+	TokValues
+	TokEach
+	TokExists
+	TokDelete
+	TokSort
+	TokReverse
+	TokMap
+	TokGrep
+	TokJoin
+	TokSplit
+
+	// String functions
+	TokLength
+	TokSubstr
+	TokIndex
+	TokRindex
+	TokLc
+	TokUc
+	TokLcfirst
+	TokUcfirst
+	TokChomp
+	TokChop
+	TokChr
+	TokOrd
+	TokHex
+	TokOct
+	TokPack
+	TokUnpack
+	TokSprintf
+
+	// Numeric functions
+	TokAbs
+	TokInt
+	TokSqrt
+	TokRand
+	TokSrand
+	TokSin
+	TokCos
+	TokAtan2
+	TokExp
+	TokLog
+
+	// Misc functions
+	TokLocaltime
+	TokGmtime
+	TokTime
+	TokSleep
+	TokExit
+	TokSystem
+	TokExec
+	TokFork
+	TokWait
+	TokKill
 )
 
 // Token represents a lexical token.
@@ -328,6 +392,67 @@ var keywords = map[string]TokenType{
 	"wantarray": TokWantarray,
 	"caller":    TokCaller,
 	"scalar":    TokScalarKw,
+
+	// Array/Hash functions
+	"shift":   TokShift,
+	"unshift": TokUnshift,
+	"pop":     TokPop,
+	"push":    TokPush,
+	"splice":  TokSplice,
+	"keys":    TokKeys,
+	"values":  TokValues,
+	"each":    TokEach,
+	"exists":  TokExists,
+	"delete":  TokDelete,
+	"sort":    TokSort,
+	"reverse": TokReverse,
+	"map":     TokMap,
+	"grep":    TokGrep,
+	"join":    TokJoin,
+	"split":   TokSplit,
+
+	// String functions
+	"length":  TokLength,
+	"substr":  TokSubstr,
+	"index":   TokIndex,
+	"rindex":  TokRindex,
+	"lc":      TokLc,
+	"uc":      TokUc,
+	"lcfirst": TokLcfirst,
+	"ucfirst": TokUcfirst,
+	"chomp":   TokChomp,
+	"chop":    TokChop,
+	"chr":     TokChr,
+	"ord":     TokOrd,
+	"hex":     TokHex,
+	"oct":     TokOct,
+	"pack":    TokPack,
+	"unpack":  TokUnpack,
+	"sprintf": TokSprintf,
+
+	// Numeric functions
+	"abs":   TokAbs,
+	"int":   TokInt,
+	"sqrt":  TokSqrt,
+	"rand":  TokRand,
+	"srand": TokSrand,
+	"sin":   TokSin,
+	"cos":   TokCos,
+	"atan2": TokAtan2,
+	"exp":   TokExp,
+	"log":   TokLog,
+
+	// Misc functions
+	"localtime": TokLocaltime,
+	"gmtime":    TokGmtime,
+	"time":      TokTime,
+	"sleep":     TokSleep,
+	"exit":      TokExit,
+	"system":    TokSystem,
+	"exec":      TokExec,
+	"fork":      TokFork,
+	"wait":      TokWait,
+	"kill":      TokKill,
 }
 
 // LookupKeyword returns the token type for an identifier.
