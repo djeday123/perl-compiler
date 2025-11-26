@@ -674,6 +674,16 @@ func (sv *SV) String() string {
 	return fmt.Sprintf("SV{type=%v, flags=0x%x, val=%q}", sv.typ, sv.flags, sv.AsString())
 }
 
+// IsTrue returns true if value is truthy (alias for AsBool)
+func (sv *SV) IsTrue() bool {
+	return sv.AsBool()
+}
+
+// RefType returns the reference type as string
+func (sv *SV) RefType() string {
+	return Ref(sv).AsString()
+}
+
 func (t Type) String() string {
 	names := []string{"undef", "int", "float", "string", "ref", "array", "hash", "code", "glob", "regex", "io"}
 	if int(t) < len(names) {

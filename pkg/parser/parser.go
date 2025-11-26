@@ -1212,26 +1212,43 @@ func (p *Parser) parseForStmt() ast.Statement {
 		return nil
 	}
 
-	// Peek ahead to determine C-style or foreach-style
-	// C-tarzı veya foreach-tarzı belirlemek için ileriye bak
-	p.nextToken()
+	p.nextToken() // skip (, now at first token inside
 
 	// Check if it's foreach-style: for my $x (@arr) or for $x (@arr)
-	// foreach-tarzı mı kontrol et: for my $x (@arr) veya for $x (@arr)
-	if p.curTokenIs(lexer.TokMy) || p.curTokenIs(lexer.TokScalar) {
-		// Foreach-style
-		return p.parseForeachStyleFor(token)
+	// Need to look ahead to distinguish from C-style: for (my $i = 0; ...)
+	if p.curTokenIs(lexer.TokMy) || p.curTokenIs(lexer.TokOur) || p.curTokenIs(lexer.TokLocal) {
+		// Save position to check what follows the variable
+		// If "my $x (" -> foreach style
+		// If "my $x =" -> C-style
+
+		// Peek: my $var ... what's next?
+		// For C-style: my $i = 0; -> after $i comes =
+		// For foreach: my $x (@arr) -> after $x comes ( but we're already past outer (
+
+		// Actually in "for (my $i = 0; ...)" we're inside parens
+		// In "for my $x (@arr)" the my is OUTSIDE parens
+		// But our current position is AFTER (, so this must be C-style!
+
+		// So if we're here (after opening paren) and see "my", it's C-style init
+		// Fall through to C-style parsing
+	} else if p.curTokenIs(lexer.TokScalar) {
+		// for ($x ...) - need to check if it's foreach or C-style
+		// For now, assume C-style if inside parens
 	}
 
-	// C-style for
+	// C-style for: for (init; cond; post) { body }
 	stmt := &ast.ForStmt{Token: token}
 
 	// Init
 	if !p.curTokenIs(lexer.TokSemi) {
 		stmt.Init = p.parseStatement()
 	}
-	if p.curTokenIs(lexer.TokSemi) {
+	// After parseStatement, we might be on ; or need to advance
+	if p.peekTokenIs(lexer.TokSemi) {
 		p.nextToken()
+	}
+	if p.curTokenIs(lexer.TokSemi) {
+		p.nextToken() // skip ;
 	}
 
 	// Condition
@@ -1241,7 +1258,7 @@ func (p *Parser) parseForStmt() ast.Statement {
 	if !p.expectPeek(lexer.TokSemi) {
 		return nil
 	}
-	p.nextToken()
+	p.nextToken() // skip ;
 
 	// Post
 	if !p.curTokenIs(lexer.TokRParen) {
@@ -1251,6 +1268,7 @@ func (p *Parser) parseForStmt() ast.Statement {
 		return nil
 	}
 
+	// Body
 	if !p.expectPeek(lexer.TokLBrace) {
 		return nil
 	}
