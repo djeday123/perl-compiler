@@ -448,8 +448,6 @@ func (l *Lexer) readLess() Token {
 			tok.Value = "<<="
 			l.readChar()
 		} else {
-			// Could be heredoc or left shift
-			// Heredoc veya sola kaydırma olabilir
 			tok.Type = TokLeftShift
 			tok.Value = "<<"
 		}
@@ -463,9 +461,42 @@ func (l *Lexer) readLess() Token {
 			tok.Type = TokLe
 			tok.Value = "<="
 		}
+	case '>':
+		// <> - read from ARGV/STDIN
+		tok.Type = TokDiamond
+		tok.Value = "<>"
+		l.readChar()
+	case '$':
+		// <$fh> - read from filehandle variable
+		tok.Type = TokReadLine
+		var sb strings.Builder
+		sb.WriteRune(l.ch)
+		l.readChar()
+		for l.ch != '>' && l.ch != 0 {
+			sb.WriteRune(l.ch)
+			l.readChar()
+		}
+		tok.Value = sb.String()
+		if l.ch == '>' {
+			l.readChar()
+		}
 	default:
-		tok.Type = TokLt
-		tok.Value = "<"
+		// Check if it's <FH> (bareword filehandle)
+		if isIdentStart(l.ch) {
+			tok.Type = TokReadLine
+			var sb strings.Builder
+			for l.ch != '>' && l.ch != 0 && !isSpace(l.ch) {
+				sb.WriteRune(l.ch)
+				l.readChar()
+			}
+			tok.Value = sb.String()
+			if l.ch == '>' {
+				l.readChar()
+			}
+		} else {
+			tok.Type = TokLt
+			tok.Value = "<"
+		}
 	}
 	return tok
 }
@@ -1057,4 +1088,8 @@ func isIdentStart(ch rune) bool {
 
 func isIdentChar(ch rune) bool {
 	return ch == '_' || unicode.IsLetter(ch) || unicode.IsDigit(ch)
+}
+
+func isSpace(ch rune) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 }

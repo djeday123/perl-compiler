@@ -2,6 +2,8 @@
 package context
 
 import (
+	"bufio"
+	"os"
 	"perlc/pkg/ast"
 	"perlc/pkg/sv"
 )
@@ -26,14 +28,31 @@ type Context struct {
 	hasLast     bool
 	nextLabel   string
 	hasNext     bool
+	filehandles map[string]*FileHandle
 }
+
+type FileHandle struct {
+	File    *os.File
+	Scanner *bufio.Scanner
+	Writer  *bufio.Writer
+	Mode    string
+}
+
+// // В NewContext() добавь инициализацию:
+// func NewContext(rt *Runtime) *Context {
+// 	return &Context{
+// 		// ... существующие поля
+// 		filehandles: make(map[string]*FileHandle),
+// 	}
+// }
 
 // New creates a new interpreter context.
 func New() *Context {
 	return &Context{
-		runtime: GetRuntime(),
-		scopes:  []map[string]*sv.SV{make(map[string]*sv.SV)},
-		subs:    make(map[string]*ast.BlockStmt),
+		runtime:     GetRuntime(),
+		scopes:      []map[string]*sv.SV{make(map[string]*sv.SV)},
+		subs:        make(map[string]*ast.BlockStmt),
+		filehandles: make(map[string]*FileHandle),
 	}
 }
 
@@ -231,4 +250,73 @@ func (c *Context) GetSpecialVar(name string) *sv.SV {
 	default:
 		return sv.NewUndef()
 	}
+}
+
+// ============================================================
+// File Handle Management
+// ============================================================
+
+// Добавь методы:
+func (c *Context) OpenFile(name, mode, filename string) error {
+	var file *os.File
+	var err error
+
+	switch mode {
+	case "<", "r":
+		file, err = os.Open(filename)
+	case ">", "w":
+		file, err = os.Create(filename)
+	case ">>", "a":
+		file, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	default:
+		file, err = os.Open(filename)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	fh := &FileHandle{File: file, Mode: mode}
+	if mode == "<" || mode == "r" {
+		fh.Scanner = bufio.NewScanner(file)
+	} else {
+		fh.Writer = bufio.NewWriter(file)
+	}
+
+	c.filehandles[name] = fh
+	return nil
+}
+
+func (c *Context) CloseFile(name string) error {
+	if fh, ok := c.filehandles[name]; ok {
+		if fh.Writer != nil {
+			fh.Writer.Flush()
+		}
+		err := fh.File.Close()
+		delete(c.filehandles, name)
+		return err
+	}
+	return nil
+}
+
+func (c *Context) ReadLine(name string) (string, bool) {
+	// Empty name means STDIN
+	if name == "" {
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			return scanner.Text() + "\n", true
+		}
+		return "", false
+	}
+
+	if fh, ok := c.filehandles[name]; ok && fh.Scanner != nil {
+		if fh.Scanner.Scan() {
+			return fh.Scanner.Text() + "\n", true
+		}
+	}
+	return "", false
+}
+
+func (c *Context) GetFileHandle(name string) *FileHandle {
+	return c.filehandles[name]
 }

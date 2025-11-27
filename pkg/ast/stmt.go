@@ -352,3 +352,34 @@ func (gs *GivenStmt) String() string {
 	out.WriteString("}")
 	return out.String()
 }
+
+// OpenStmt represents open(FH, MODE, FILE).
+type OpenStmt struct {
+	Token      lexer.Token
+	Filehandle Expression
+	Mode       Expression
+	Filename   Expression
+}
+
+func (os *OpenStmt) statementNode()       {}
+func (os *OpenStmt) TokenLiteral() string { return os.Token.Value }
+func (os *OpenStmt) String() string {
+	return fmt.Sprintf("open(%s, %s, %s)", os.Filehandle.String(), os.Mode.String(), os.Filename.String())
+}
+
+// CloseStmt represents close(FH).
+type CloseStmt struct {
+	Token      lexer.Token
+	Filehandle Expression
+}
+
+func (cs *CloseStmt) statementNode()       {}
+func (cs *CloseStmt) TokenLiteral() string { return cs.Token.Value }
+func (cs *CloseStmt) String() string {
+	return fmt.Sprintf("close(%s)", cs.Filehandle.String())
+}
+
+// ============================================================
+// End of File
+// Dosya Sonu
+// ============================================================

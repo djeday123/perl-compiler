@@ -175,6 +175,8 @@ const (
 	TokOpen
 	TokClose
 	TokRead
+	TokDiamond  // <>
+	TokReadLine // <$fh> or <FH>
 	TokWrite
 	TokDefined
 	TokUndef

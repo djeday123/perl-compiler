@@ -13,18 +13,127 @@ import (
 	"perlc/pkg/sv"
 )
 
-func (i *Interpreter) builtinPrint(args []*sv.SV) *sv.SV {
-	for _, arg := range args {
-		fmt.Fprint(i.stdout, arg.AsString())
+func (i *Interpreter) builtinPrint(expr *ast.CallExpr) *sv.SV {
+	// Debug
+	//fmt.Fprintf(os.Stderr, "DEBUG print: %d args\n", len(expr.Args))
+	// for idx, arg := range expr.Args {
+	// 	fmt.Fprintf(os.Stderr, "  arg[%d]: %T = %s\n", idx, arg, arg.String())
+	// }
+	// Check if first arg is filehandle
+	if len(expr.Args) >= 2 {
+		if fhVar, ok := expr.Args[0].(*ast.ScalarVar); ok {
+			fhName := i.ctx.GetVar(fhVar.Name)
+			if fhName != nil {
+				fh := i.ctx.GetFileHandle(fhName.AsString())
+				if fh != nil && fh.Writer != nil {
+					for _, arg := range expr.Args[1:] {
+						val := i.evalExpression(arg)
+						fh.Writer.WriteString(val.AsString())
+					}
+					return sv.NewInt(1)
+				}
+			}
+		}
+	}
+	// Normal print to stdout
+	for _, arg := range expr.Args {
+		val := i.evalExpression(arg)
+		fmt.Fprint(i.stdout, val.AsString())
 	}
 	return sv.NewInt(1)
 }
 
-func (i *Interpreter) builtinSay(args []*sv.SV) *sv.SV {
-	for _, arg := range args {
-		fmt.Fprint(i.stdout, arg.AsString())
+func (i *Interpreter) builtinSay(expr *ast.CallExpr) *sv.SV {
+	// Check if first arg is filehandle
+	if len(expr.Args) >= 2 {
+		if fhVar, ok := expr.Args[0].(*ast.ScalarVar); ok {
+			fhName := i.ctx.GetVar(fhVar.Name)
+			if fhName != nil {
+				fh := i.ctx.GetFileHandle(fhName.AsString())
+				if fh != nil && fh.Writer != nil {
+					for _, arg := range expr.Args[1:] {
+						val := i.evalExpression(arg)
+						fh.Writer.WriteString(val.AsString())
+					}
+					fh.Writer.WriteString("\n")
+					return sv.NewInt(1)
+				}
+			}
+		}
+	}
+	// Normal say to stdout
+	for _, arg := range expr.Args {
+		val := i.evalExpression(arg)
+		fmt.Fprint(i.stdout, val.AsString())
 	}
 	fmt.Fprintln(i.stdout)
+	return sv.NewInt(1)
+}
+
+func (i *Interpreter) builtinOpen(expr *ast.CallExpr) *sv.SV {
+	if len(expr.Args) < 2 {
+		return sv.NewInt(0)
+	}
+
+	var fhName string
+	switch fh := expr.Args[0].(type) {
+	case *ast.ScalarVar:
+		fhName = fh.Name
+	case *ast.Identifier:
+		fhName = fh.Value
+	}
+
+	mode := i.evalExpression(expr.Args[1]).AsString()
+	var filename string
+
+	if len(expr.Args) >= 3 && expr.Args[2] != nil {
+		filename = i.evalExpression(expr.Args[2]).AsString()
+	} else {
+		// 2-arg form: extract filename from mode
+		if len(mode) > 0 {
+			switch mode[0] {
+			case '<':
+				filename = strings.TrimSpace(mode[1:])
+				mode = "<"
+			case '>':
+				if len(mode) > 1 && mode[1] == '>' {
+					filename = strings.TrimSpace(mode[2:])
+					mode = ">>"
+				} else {
+					filename = strings.TrimSpace(mode[1:])
+					mode = ">"
+				}
+			}
+		}
+	}
+
+	err := i.ctx.OpenFile(fhName, mode, filename)
+	if err != nil {
+		return sv.NewInt(0)
+	}
+	i.ctx.SetVar(fhName, sv.NewString(fhName))
+	return sv.NewInt(1)
+}
+
+func (i *Interpreter) builtinClose(expr *ast.CallExpr) *sv.SV {
+	if len(expr.Args) < 1 {
+		return sv.NewInt(0)
+	}
+
+	var fhName string
+	switch fh := expr.Args[0].(type) {
+	case *ast.ScalarVar:
+		fhName = fh.Name
+	case *ast.Identifier:
+		fhName = fh.Value
+	default:
+		fhName = i.evalExpression(expr.Args[0]).AsString()
+	}
+
+	err := i.ctx.CloseFile(fhName)
+	if err != nil {
+		return sv.NewInt(0)
+	}
 	return sv.NewInt(1)
 }
 

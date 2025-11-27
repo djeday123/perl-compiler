@@ -336,6 +336,8 @@ func (i *Interpreter) evalExpression(expr ast.Expression) *sv.SV {
 		return i.evalMatchExpr(e)
 	case *ast.SubstExpr:
 		return i.evalSubstExpr(e)
+	case *ast.ReadLineExpr:
+		return i.evalReadLineExpr(e)
 	default:
 		return sv.NewUndef()
 	}
@@ -554,9 +556,13 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr) *sv.SV {
 	// Built-in functions
 	switch funcName {
 	case "print":
-		return i.builtinPrint(args)
+		return i.builtinPrint(expr)
 	case "say":
-		return i.builtinSay(args)
+		return i.builtinSay(expr)
+	case "open":
+		return i.builtinOpen(expr)
+	case "close":
+		return i.builtinClose(expr)
 	case "length":
 		return sv.Length(args[0])
 	case "defined":
@@ -792,10 +798,10 @@ func (i *Interpreter) evalSubstExpr(expr *ast.SubstExpr) *sv.SV {
 	if strings.Contains(flags, "g") {
 		result = re.ReplaceAllString(str, replacement)
 	} else {
-		result = re.ReplaceAllStringFunc(str, func(match string) string {
-			// Only replace first occurrence
-			return replacement
-		})
+		// result = re.ReplaceAllStringFunc(str, func(match string) string {
+		// 	// Only replace first occurrence
+		// 	return replacement
+		// })
 		// Actually simpler:
 		loc := re.FindStringIndex(str)
 		if loc != nil {
@@ -814,6 +820,31 @@ func (i *Interpreter) evalSubstExpr(expr *ast.SubstExpr) *sv.SV {
 		return sv.NewInt(1)
 	}
 	return sv.NewInt(0)
+}
+
+func (i *Interpreter) evalReadLineExpr(expr *ast.ReadLineExpr) *sv.SV {
+	var name string
+	if expr.Filehandle != nil {
+		switch fh := expr.Filehandle.(type) {
+		case *ast.Identifier:
+			name = fh.Value
+		case *ast.ScalarVar:
+			// Get the value which contains the filehandle name
+			val := i.ctx.GetVar(fh.Name)
+			if val != nil {
+				name = val.AsString()
+			}
+			if name == "" {
+				name = fh.Name
+			}
+		}
+	}
+
+	line, ok := i.ctx.ReadLine(name)
+	if !ok {
+		return sv.NewUndef()
+	}
+	return sv.NewString(line)
 }
 
 func boolToSV(b bool) *sv.SV {

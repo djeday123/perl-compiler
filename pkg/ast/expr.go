@@ -367,6 +367,21 @@ func (he *HashExpr) String() string {
 	return "{" + strings.Join(pairs, ", ") + "}"
 }
 
+// ReadLineExpr represents <FH> or <$fh>.
+type ReadLineExpr struct {
+	Token      lexer.Token
+	Filehandle Expression // can be Identifier or ScalarVar
+}
+
+func (rl *ReadLineExpr) expressionNode()      {}
+func (rl *ReadLineExpr) TokenLiteral() string { return rl.Token.Value }
+func (rl *ReadLineExpr) String() string {
+	if rl.Filehandle != nil {
+		return "<" + rl.Filehandle.String() + ">"
+	}
+	return "<>"
+}
+
 // RangeExpr represents $a .. $b or $a ... $b.
 // RangeExpr, $a .. $b veya $a ... $b'yi temsil eder.
 type RangeExpr struct {

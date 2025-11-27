@@ -13,12 +13,15 @@ type Generator struct {
 	output strings.Builder
 	indent int
 	//varCount  int
-	tempCount int
+	tempCount    int
+	declaredVars map[string]bool
 }
 
 // New creates a new Generator.
 func New() *Generator {
-	return &Generator{}
+	return &Generator{
+		declaredVars: make(map[string]bool),
+	}
 }
 
 // Generate generates Go code from a program.
@@ -30,8 +33,10 @@ func (g *Generator) Generate(program *ast.Program) string {
 	g.writeln("")
 	g.writeln("import (")
 	g.indent++
+	g.writeln(`"bufio"`)
 	g.writeln(`"fmt"`)
 	g.writeln(`"math"`)
+	g.writeln(`"os"`)
 	g.writeln(`"regexp"`)
 	g.writeln(`"strings"`)
 	g.indent--
@@ -43,6 +48,8 @@ func (g *Generator) Generate(program *ast.Program) string {
 	g.writeln("var _ = strings.Join")
 	g.writeln("var _ = math.Abs")
 	g.writeln("var _ = regexp.Compile")
+	g.writeln("var _ = bufio.NewReader")
+	g.writeln("var _ = os.Stdin")
 	g.writeln("")
 
 	// Runtime types and functions
@@ -106,6 +113,8 @@ func (g *Generator) writeRuntime() {
 	g.indent--
 	g.writeln(")")
 	g.writeln("")
+
+	// g.writeln("var _ = bufio.NewReader") //- Move to generate
 
 	// Constructors
 	g.writeln("func svInt(i int64) *SV { return &SV{iv: i, flags: SVf_IOK} }")
@@ -300,6 +309,79 @@ func (g *Generator) writeRuntime() {
 	g.writeln(`func perlOrd(s *SV) *SV { r := []rune(s.AsString()); if len(r) > 0 { return svInt(int64(r[0])) }; return svUndef() }`)
 	g.writeln("")
 
+	g.writeln("var _filehandles = make(map[string]*_FileHandle)")
+	g.writeln("")
+	g.writeln(`type _FileHandle struct {
+	file    *os.File
+	scanner *bufio.Scanner
+	writer  *bufio.Writer
+}`)
+	g.writeln("")
+	g.writeln(`func perlOpen(name, mode, filename string) *SV {
+	var file *os.File
+	var err error
+	switch mode {
+	case "<", "r":
+		file, err = os.Open(filename)
+	case ">", "w":
+		file, err = os.Create(filename)
+	case ">>", "a":
+		file, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	default:
+		file, err = os.Open(filename)
+	}
+	if err != nil { return svInt(0) }
+	fh := &_FileHandle{file: file}
+	if mode == "<" || mode == "r" || mode == "" {
+		fh.scanner = bufio.NewScanner(file)
+	} else {
+		fh.writer = bufio.NewWriter(file)
+	}
+	_filehandles[name] = fh
+	return svInt(1)
+}`)
+	g.writeln("")
+	g.writeln(`func perlClose(name string) *SV {
+	if fh, ok := _filehandles[name]; ok {
+		if fh.writer != nil { fh.writer.Flush() }
+		fh.file.Close()
+		delete(_filehandles, name)
+		return svInt(1)
+	}
+	return svInt(0)
+}`)
+	g.writeln("")
+	g.writeln(`func perlReadLine(name string) *SV {
+	if name == "" {
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() { return svStr(scanner.Text() + "\n") }
+		return svUndef()
+	}
+	if fh, ok := _filehandles[name]; ok && fh.scanner != nil {
+		if fh.scanner.Scan() { return svStr(fh.scanner.Text() + "\n") }
+	}
+	return svUndef()
+}`)
+	g.writeln("")
+
+	g.writeln(`func perlPrintFH(fhName string, args ...*SV) *SV {
+	if fh, ok := _filehandles[fhName]; ok && fh.writer != nil {
+		for _, a := range args { fh.writer.WriteString(a.AsString()) }
+		return svInt(1)
+	}
+	return svInt(0)
+}`)
+	g.writeln("")
+	g.writeln(`func perlSayFH(fhName string, args ...*SV) *SV {
+	if fh, ok := _filehandles[fhName]; ok && fh.writer != nil {
+		for _, a := range args { fh.writer.WriteString(a.AsString()) }
+		fh.writer.WriteString("\n")
+		return svInt(1)
+	}
+	return svInt(0)
+}`)
+	g.writeln("")
+
 	g.writeln("// ============ End Runtime ============")
 	g.writeln("")
 }
@@ -319,6 +401,13 @@ func (g *Generator) writeln(s string) {
 func (g *Generator) generateStatement(stmt ast.Statement) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
+		// Special handling for open() to declare filehandle variable
+		if call, ok := s.Expression.(*ast.CallExpr); ok {
+			if ident, ok := call.Function.(*ast.Identifier); ok && ident.Value == "open" {
+				g.generateOpenStatement(call)
+				return
+			}
+		}
 		g.write(strings.Repeat("\t", g.indent))
 		g.generateExpression(s.Expression)
 		g.write("\n")
@@ -350,9 +439,9 @@ func (g *Generator) generateStatement(stmt ast.Statement) {
 }
 
 func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
-	// Single value case
 	if len(decl.Names) == 1 {
 		name := g.varName(decl.Names[0])
+		g.declaredVars[name] = true
 		g.write(strings.Repeat("\t", g.indent))
 		if decl.Value != nil {
 			g.write(name + " := ")
@@ -365,14 +454,13 @@ func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
 		return
 	}
 
-	// Multiple names - need to handle array assignment
-	for i, v := range decl.Names {
+	for _, v := range decl.Names {
 		name := g.varName(v)
+		g.declaredVars[name] = true
 		g.write(strings.Repeat("\t", g.indent))
 		g.write(name + " := svUndef()")
 		g.write("\n")
 		g.writeln("_ = " + name)
-		_ = i
 	}
 }
 
@@ -605,6 +693,8 @@ func (g *Generator) generateExpression(expr ast.Expression) {
 		g.generateMatchExpr(e)
 	case *ast.SubstExpr:
 		g.generateSubstExpr(e)
+	case *ast.ReadLineExpr:
+		g.generateReadLineExpr(e)
 	default:
 		g.write("svUndef()")
 	}
@@ -781,6 +871,21 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 		name := ident.Value
 		switch name {
 		case "print":
+			// Check if first arg is filehandle
+			if len(expr.Args) >= 2 {
+				if _, ok := expr.Args[0].(*ast.ScalarVar); ok {
+					// print $fh "text" form
+					g.write("perlPrintFH(")
+					g.generateExpression(expr.Args[0])
+					g.write(".AsString()")
+					for _, a := range expr.Args[1:] {
+						g.write(", ")
+						g.generateExpression(a)
+					}
+					g.write(")")
+					return
+				}
+			}
 			g.write("perlPrint(")
 			for i, a := range expr.Args {
 				if i > 0 {
@@ -790,6 +895,21 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 			}
 			g.write(")")
 		case "say":
+			// Check if first arg is filehandle
+			if len(expr.Args) >= 2 {
+				if _, ok := expr.Args[0].(*ast.ScalarVar); ok {
+					// say $fh "text" form
+					g.write("perlSayFH(")
+					g.generateExpression(expr.Args[0])
+					g.write(".AsString()")
+					for _, a := range expr.Args[1:] {
+						g.write(", ")
+						g.generateExpression(a)
+					}
+					g.write(")")
+					return
+				}
+			}
 			g.write("perlSay(")
 			for i, a := range expr.Args {
 				if i > 0 {
@@ -876,6 +996,27 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 			g.write("perlOrd(")
 			g.generateExpression(expr.Args[0])
 			g.write(")")
+		case "open":
+			if len(expr.Args) >= 2 {
+				g.write("perlOpen(")
+				g.generateExpression(expr.Args[0])
+				g.write(".AsString(), ")
+				g.generateExpression(expr.Args[1])
+				g.write(".AsString(), ")
+				if len(expr.Args) >= 3 && expr.Args[2] != nil {
+					g.generateExpression(expr.Args[2])
+					g.write(".AsString()")
+				} else {
+					g.write("\"\"")
+				}
+				g.write(")")
+			}
+		case "close":
+			if len(expr.Args) >= 1 {
+				g.write("perlClose(")
+				g.generateExpression(expr.Args[0])
+				g.write(".AsString())")
+			}
 		default:
 			// User-defined function
 			g.write("perl_" + name + "(")
@@ -1036,6 +1177,57 @@ func (g *Generator) generateSubstExpr(expr *ast.SubstExpr) {
 		g.write("if _loc != nil { " + varName + " = svStr(_old[:_loc[0]] + `" + replacement + "` + _old[_loc[1]:]); return svInt(1) }; ")
 		g.write("return svInt(0) }()")
 	}
+}
+
+func (g *Generator) generateReadLineExpr(expr *ast.ReadLineExpr) {
+	var name string
+	if expr.Filehandle != nil {
+		switch fh := expr.Filehandle.(type) {
+		case *ast.Identifier:
+			name = fh.Value
+		case *ast.ScalarVar:
+			name = fh.Name // НЕ добавляем "v_" prefix!
+		}
+	}
+
+	if name == "" {
+		g.write("perlReadLine(\"\")")
+	} else {
+		g.write("perlReadLine(\"" + name + "\")")
+	}
+}
+
+func (g *Generator) generateOpenStatement(expr *ast.CallExpr) {
+	if len(expr.Args) < 2 {
+		return
+	}
+
+	// Declare or assign filehandle variable
+	if sv, ok := expr.Args[0].(*ast.ScalarVar); ok {
+		name := g.scalarName(sv.Name)
+		if !g.declaredVars[name] {
+			g.writeln(name + " := svStr(\"" + sv.Name + "\")")
+			g.writeln("_ = " + name)
+			g.declaredVars[name] = true
+		} else {
+			g.writeln(name + " = svStr(\"" + sv.Name + "\")")
+		}
+	}
+
+	// Call perlOpen
+	g.write(strings.Repeat("\t", g.indent))
+	g.write("perlOpen(")
+	g.generateExpression(expr.Args[0])
+	g.write(".AsString(), ")
+	g.generateExpression(expr.Args[1])
+	g.write(".AsString(), ")
+	if len(expr.Args) >= 3 && expr.Args[2] != nil {
+		g.generateExpression(expr.Args[2])
+		g.write(".AsString()")
+	} else {
+		g.write("\"\"")
+	}
+	g.write(")\n")
 }
 
 func isAlnum(c byte) bool {

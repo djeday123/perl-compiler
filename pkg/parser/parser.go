@@ -300,6 +300,11 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerPrefix(lexer.TokWait, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokKill, p.parseBuiltinCall)
 
+	p.registerPrefix(lexer.TokOpen, p.parseOpenExpr)
+	p.registerPrefix(lexer.TokClose, p.parseCloseExpr)
+	p.registerPrefix(lexer.TokDiamond, p.parseReadLineExpr)
+	p.registerPrefix(lexer.TokReadLine, p.parseReadLineExpr)
+
 	// Regex builtins
 	// p.registerInfix(lexer.TokSubst, p.parseSubstExpression)
 
@@ -1432,33 +1437,73 @@ func (p *Parser) parseFatArrowExpression(left ast.Expression) ast.Expression {
 }
 
 func (p *Parser) parseBuiltinCall() ast.Expression {
-	exp := &ast.CallExpr{
-		Token:    p.curToken,
-		Function: &ast.Identifier{Token: p.curToken, Value: p.curToken.Value},
+	tok := p.curToken
+	name := tok.Value
+
+	// Special handling for print/say with filehandle: print $fh "text"
+	if name == "print" || name == "say" {
+		return p.parsePrintCall(tok, name)
 	}
 
-	// Check for parentheses or direct args
-	// Parantez veya doğrudan argümanlar kontrol et
+	expr := &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: name},
+	}
+
+	// Check for parentheses
 	if p.peekTokenIs(lexer.TokLParen) {
 		p.nextToken()
-		exp.Args = p.parseExpressionList(lexer.TokRParen)
-	} else if !p.peekTokenIs(lexer.TokSemi) && !p.peekTokenIs(lexer.TokRBrace) &&
-		!p.peekTokenIs(lexer.TokEOF) && !p.peekTokenIs(lexer.TokComma) &&
-		!p.peekTokenIs(lexer.TokRParen) {
-		// Parse arguments without parens until statement end
-		// Parantez olmadan argümanları deyim sonuna kadar ayrıştır
 		p.nextToken()
-		exp.Args = []ast.Expression{p.parseExpression(COMMA)}
-
-		// Handle multiple args separated by comma
-		for p.peekTokenIs(lexer.TokComma) {
-			p.nextToken()
-			p.nextToken()
-			exp.Args = append(exp.Args, p.parseExpression(COMMA))
-		}
+		expr.Args = p.parseExpressionList(lexer.TokRParen)
+	} else {
+		// No parentheses - parse arguments
+		p.nextToken()
+		expr.Args = p.parseListExpression()
 	}
 
-	return exp
+	return expr
+}
+
+func (p *Parser) parsePrintCall(tok lexer.Token, name string) ast.Expression {
+	expr := &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: name},
+	}
+
+	// Check for parentheses
+	if p.peekTokenIs(lexer.TokLParen) {
+		p.nextToken()
+		p.nextToken()
+		expr.Args = p.parseExpressionList(lexer.TokRParen)
+		return expr
+	}
+
+	p.nextToken()
+
+	// Check if first token is a scalar variable (potential filehandle)
+	if p.curTokenIs(lexer.TokScalar) {
+		fhExpr := p.parseExpression(CALL)
+
+		// Check if next token is expression (not comma, not semicolon) - filehandle form
+		if !p.peekTokenIs(lexer.TokComma) && !p.peekTokenIs(lexer.TokSemi) && !p.peekTokenIs(lexer.TokEOF) {
+			expr.Args = append(expr.Args, fhExpr)
+			p.nextToken()
+			expr.Args = append(expr.Args, p.parseListExpression()...)
+		} else {
+			// Normal: print $var; or print $var, $var2;
+			expr.Args = append(expr.Args, fhExpr)
+			if p.peekTokenIs(lexer.TokComma) {
+				p.nextToken()
+				p.nextToken()
+				expr.Args = append(expr.Args, p.parseListExpression()...)
+			}
+		}
+		return expr
+	}
+
+	// Normal print without filehandle
+	expr.Args = p.parseListExpression()
+	return expr
 }
 
 var _ = (*Parser).parseSubstExpression
@@ -1487,4 +1532,111 @@ func (p *Parser) parseSubstExpression(left ast.Expression) ast.Expression {
 		Replacement: replacement,
 		Flags:       flags,
 	}
+}
+
+func (p *Parser) parseOpenExpr() ast.Expression {
+	tok := p.curToken
+
+	if !p.expectPeek(lexer.TokLParen) {
+		// open without parens: open FH, MODE, FILE
+		p.nextToken()
+	} else {
+		p.nextToken() // skip (
+	}
+
+	// Filehandle
+	var fh ast.Expression
+	if p.curTokenIs(lexer.TokMy) {
+		p.nextToken() // skip my
+	}
+	fh = p.parseExpression(LOWEST)
+
+	if !p.expectPeek(lexer.TokComma) {
+		return nil
+	}
+	p.nextToken()
+
+	// Mode
+	mode := p.parseExpression(LOWEST)
+
+	// Optional third argument (filename)
+	var filename ast.Expression
+	if p.peekTokenIs(lexer.TokComma) {
+		p.nextToken() // skip comma
+		p.nextToken()
+		filename = p.parseExpression(LOWEST)
+	}
+
+	if p.peekTokenIs(lexer.TokRParen) {
+		p.nextToken()
+	}
+
+	return &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: "open"},
+		Args:     []ast.Expression{fh, mode, filename},
+	}
+}
+
+func (p *Parser) parseCloseExpr() ast.Expression {
+	tok := p.curToken
+
+	if !p.expectPeek(lexer.TokLParen) {
+		p.nextToken()
+	} else {
+		p.nextToken() // skip (
+	}
+
+	fh := p.parseExpression(LOWEST)
+
+	if p.peekTokenIs(lexer.TokRParen) {
+		p.nextToken()
+	}
+
+	return &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: "close"},
+		Args:     []ast.Expression{fh},
+	}
+}
+
+func (p *Parser) parseReadLineExpr() ast.Expression {
+	tok := p.curToken
+
+	expr := &ast.ReadLineExpr{Token: tok}
+
+	if tok.Type == lexer.TokDiamond {
+		// <> - STDIN/ARGV
+		expr.Filehandle = nil
+	} else {
+		// <FH> or <$fh>
+		if len(tok.Value) > 0 && tok.Value[0] == '$' {
+			// Variable filehandle
+			expr.Filehandle = &ast.ScalarVar{Token: tok, Name: tok.Value[1:]}
+		} else {
+			// Bareword filehandle
+			expr.Filehandle = &ast.Identifier{Token: tok, Value: tok.Value}
+		}
+	}
+
+	return expr
+}
+
+// parseListExpression parses comma-separated expressions until semicolon or EOF
+func (p *Parser) parseListExpression() []ast.Expression {
+	var list []ast.Expression
+
+	if p.curTokenIs(lexer.TokSemi) || p.curTokenIs(lexer.TokEOF) {
+		return list
+	}
+
+	list = append(list, p.parseExpression(LOWEST))
+
+	for p.peekTokenIs(lexer.TokComma) {
+		p.nextToken()
+		p.nextToken()
+		list = append(list, p.parseExpression(LOWEST))
+	}
+
+	return list
 }
