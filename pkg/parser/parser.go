@@ -1038,9 +1038,11 @@ func (p *Parser) parseVarDecl() ast.Statement {
 
 	if p.curTokenIs(lexer.TokLParen) {
 		// List declaration: my ($x, $y)
+		decl.IsList = true
 		decl.Names = p.parseExpressionList(lexer.TokRParen)
 	} else {
 		// Single variable: my $x
+		decl.IsList = false
 		decl.Names = append(decl.Names, p.parseExpression(ASSIGN))
 	}
 

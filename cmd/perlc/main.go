@@ -73,6 +73,10 @@ func compileToGo(input, filename, outputName string, runAfter bool) {
 	gen := codegen.New()
 	goCode := gen.Generate(program)
 
+	fmt.Println("=== Generated Go Code ===")
+	fmt.Println(goCode)
+	fmt.Println("=== End Generated Code ===")
+
 	// Determine output filename
 	if outputName == "" {
 		base := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))

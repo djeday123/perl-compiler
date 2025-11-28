@@ -15,10 +15,11 @@ import (
 // VarDecl represents my/our/local/state declaration.
 // VarDecl, my/our/local/state bildirimini temsil eder.
 type VarDecl struct {
-	Token lexer.Token
-	Kind  string       // "my", "our", "local", "state"
-	Names []Expression // Variables being declared
-	Value Expression   // Optional initializer
+	Token  lexer.Token
+	Kind   string       // "my", "our", "local", "state"
+	Names  []Expression // Variables being declared
+	Value  Expression   // Optional initializer
+	IsList bool         // true if declared with parentheses: my ($x) vs my $x
 }
 
 func (vd *VarDecl) statementNode()       {}

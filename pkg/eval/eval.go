@@ -117,7 +117,9 @@ func (i *Interpreter) evalVarDecl(decl *ast.VarDecl) *sv.SV {
 		}
 	}
 
-	if len(decl.Names) > 1 {
+	// List assignment: my ($x, $y) = @arr or my ($x) = @arr
+	// Only unpack if declared with parentheses (IsList)
+	if decl.IsList && decl.Value != nil {
 		values := i.svToList(value)
 		for idx, name := range decl.Names {
 			var val *sv.SV

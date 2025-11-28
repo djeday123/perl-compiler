@@ -309,6 +309,32 @@ func (g *Generator) writeRuntime() {
 	g.writeln(`func perlOrd(s *SV) *SV { r := []rune(s.AsString()); if len(r) > 0 { return svInt(int64(r[0])) }; return svUndef() }`)
 	g.writeln("")
 
+	g.writeln(`func perl_scalar(sv *SV) *SV {
+		if sv == nil { return svInt(0) }
+		if sv.flags&SVf_AOK != 0 { return svInt(int64(len(sv.av))) }
+		if sv.flags&SVf_HOK != 0 { return svInt(int64(len(sv.hv))) }
+		return sv
+}`)
+	g.writeln(`func perl_keys(h *SV) *SV {
+		if h == nil || h.hv == nil { return svArray() }
+		var keys []*SV
+		for k := range h.hv { keys = append(keys, svStr(k)) }
+		return svArray(keys...)
+}`)
+	g.writeln(`func perl_join(sep, arr *SV) *SV {
+		if arr == nil { return svStr("") }
+		var parts []string
+		for _, el := range arr.av { parts = append(parts, el.AsString()) }
+		return svStr(strings.Join(parts, sep.AsString()))
+}`)
+	g.writeln(`func perl_ref(sv *SV) *SV {
+		if sv == nil { return svStr("") }
+		if sv.flags&SVf_AOK != 0 { return svStr("ARRAY") }
+		if sv.flags&SVf_HOK != 0 { return svStr("HASH") }
+		return svStr("")
+}`)
+	g.writeln("")
+
 	g.writeln("var _filehandles = make(map[string]*_FileHandle)")
 	g.writeln("")
 	g.writeln(`type _FileHandle struct {
@@ -439,15 +465,75 @@ func (g *Generator) generateStatement(stmt ast.Statement) {
 }
 
 func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
+	// Handle list assignment: my ($a, $b) = @_
+	if decl.IsList && decl.Value != nil {
+		// Check if assigning from @_ (can be ArrayVar or SpecialVar)
+		isArgsAssign := false
+		if av, ok := decl.Value.(*ast.ArrayVar); ok && av.Name == "_" {
+			isArgsAssign = true
+		}
+		if sv, ok := decl.Value.(*ast.SpecialVar); ok && sv.Name == "@_" {
+			isArgsAssign = true
+		}
+
+		if isArgsAssign {
+			// Unpack from args
+			for i, v := range decl.Names {
+				name := g.varName(v)
+				g.declaredVars[name] = true
+				g.write(strings.Repeat("\t", g.indent))
+				g.write(fmt.Sprintf("%s := func() *SV { if %d < len(args) { return args[%d] }; return svUndef() }()\n", name, i, i))
+				g.writeln("_ = " + name)
+			}
+			return
+		}
+		// Other list assignments - generate temp array and unpack
+		g.tempCount++
+		tmpVar := fmt.Sprintf("_tmp%d", g.tempCount)
+		g.write(strings.Repeat("\t", g.indent))
+		g.write(tmpVar + " := ")
+		g.generateExpression(decl.Value)
+		g.write("\n")
+		for i, v := range decl.Names {
+			name := g.varName(v)
+			g.declaredVars[name] = true
+			g.write(strings.Repeat("\t", g.indent))
+			g.write(fmt.Sprintf("%s := svAGet(%s, svInt(%d))\n", name, tmpVar, i))
+			g.writeln("_ = " + name)
+		}
+		return
+	}
+
 	if len(decl.Names) == 1 {
 		name := g.varName(decl.Names[0])
 		g.declaredVars[name] = true
 		g.write(strings.Repeat("\t", g.indent))
-		if decl.Value != nil {
-			g.write(name + " := ")
-			g.generateExpression(decl.Value)
-		} else {
-			g.write(name + " := svUndef()")
+
+		// Check variable type for proper initialization
+		switch decl.Names[0].(type) {
+		case *ast.ArrayVar:
+			if decl.Value != nil {
+				g.write(name + " := ")
+				g.generateExpression(decl.Value)
+			} else {
+				g.write(name + " := svArray()")
+			}
+		case *ast.HashVar:
+			if decl.Value != nil {
+				// Convert array to hash
+				g.write(name + " := func() *SV { _arr := ")
+				g.generateExpression(decl.Value)
+				g.write("; _h := svHash(); for _i := 0; _i+1 < len(_arr.av); _i += 2 { svHSet(_h, _arr.av[_i], _arr.av[_i+1]) }; return _h }()")
+			} else {
+				g.write(name + " := svHash()")
+			}
+		default:
+			if decl.Value != nil {
+				g.write(name + " := ")
+				g.generateExpression(decl.Value)
+			} else {
+				g.write(name + " := svUndef()")
+			}
 		}
 		g.write("\n")
 		g.writeln("_ = " + name)
@@ -630,6 +716,14 @@ func (g *Generator) generateExpression(expr ast.Expression) {
 		g.write(g.arrayName(e.Name))
 	case *ast.HashVar:
 		g.write(g.hashName(e.Name))
+	case *ast.SpecialVar:
+		if e.Name == "@_" {
+			g.write("svArray(args...)")
+		} else if e.Name == "$_" {
+			g.write("v__") // default variable
+		} else {
+			g.write("svUndef()")
+		}
 	case *ast.PrefixExpr:
 		g.generatePrefixExpr(e)
 	case *ast.PostfixExpr:
@@ -671,13 +765,23 @@ func (g *Generator) generateExpression(expr ast.Expression) {
 		g.write("return " + hvar + " }()")
 	case *ast.ArrayAccess:
 		g.write("svAGet(")
-		g.generateExpression(e.Array)
+		// $arr[0] means access to @arr element
+		if sv, ok := e.Array.(*ast.ScalarVar); ok {
+			g.write(g.arrayName(sv.Name))
+		} else {
+			g.generateExpression(e.Array)
+		}
 		g.write(", ")
 		g.generateExpression(e.Index)
 		g.write(")")
 	case *ast.HashAccess:
 		g.write("svHGet(")
-		g.generateExpression(e.Hash)
+		// $h{key} means access to %h element
+		if sv, ok := e.Hash.(*ast.ScalarVar); ok {
+			g.write(g.hashName(sv.Name))
+		} else {
+			g.generateExpression(e.Hash)
+		}
 		g.write(", ")
 		g.generateExpression(e.Key)
 		g.write(")")
@@ -849,7 +953,11 @@ func (g *Generator) generateAssignExpr(expr *ast.AssignExpr) {
 		}
 	case *ast.ArrayAccess:
 		g.write("svASet(")
-		g.generateExpression(left.Array)
+		if sv, ok := left.Array.(*ast.ScalarVar); ok {
+			g.write(g.arrayName(sv.Name))
+		} else {
+			g.generateExpression(left.Array)
+		}
 		g.write(", ")
 		g.generateExpression(left.Index)
 		g.write(", ")
@@ -857,7 +965,11 @@ func (g *Generator) generateAssignExpr(expr *ast.AssignExpr) {
 		g.write(")")
 	case *ast.HashAccess:
 		g.write("svHSet(")
-		g.generateExpression(left.Hash)
+		if sv, ok := left.Hash.(*ast.ScalarVar); ok {
+			g.write(g.hashName(sv.Name))
+		} else {
+			g.generateExpression(left.Hash)
+		}
 		g.write(", ")
 		g.generateExpression(left.Key)
 		g.write(", ")
@@ -996,6 +1108,40 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 			g.write("perlOrd(")
 			g.generateExpression(expr.Args[0])
 			g.write(")")
+		case "scalar":
+			if len(expr.Args) >= 1 {
+				g.write("perl_scalar(")
+				g.generateExpression(expr.Args[0])
+				g.write(")")
+			} else {
+				g.write("svUndef()")
+			}
+		case "keys":
+			if len(expr.Args) >= 1 {
+				g.write("perl_keys(")
+				g.generateExpression(expr.Args[0])
+				g.write(")")
+			} else {
+				g.write("svArray()")
+			}
+		case "join":
+			if len(expr.Args) >= 2 {
+				g.write("perl_join(")
+				g.generateExpression(expr.Args[0])
+				g.write(", ")
+				g.generateExpression(expr.Args[1])
+				g.write(")")
+			} else {
+				g.write("svStr(\"\")")
+			}
+		case "ref":
+			if len(expr.Args) >= 1 {
+				g.write("perl_ref(")
+				g.generateExpression(expr.Args[0])
+				g.write(")")
+			} else {
+				g.write("svStr(\"\")")
+			}
 		case "open":
 			if len(expr.Args) >= 2 {
 				g.write("perlOpen(")
