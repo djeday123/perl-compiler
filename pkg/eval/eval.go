@@ -102,7 +102,19 @@ func (i *Interpreter) evalVarDecl(decl *ast.VarDecl) *sv.SV {
 	if decl.Value != nil {
 		value = i.evalExpression(decl.Value)
 	} else {
-		value = sv.NewUndef()
+		// Create appropriate empty value based on variable type
+		if len(decl.Names) == 1 {
+			switch decl.Names[0].(type) {
+			case *ast.HashVar:
+				value = sv.NewHashRef().Deref() // Empty hash
+			case *ast.ArrayVar:
+				value = sv.NewArrayRef().Deref() // Empty array
+			default:
+				value = sv.NewUndef()
+			}
+		} else {
+			value = sv.NewUndef()
+		}
 	}
 
 	if len(decl.Names) > 1 {
@@ -120,6 +132,28 @@ func (i *Interpreter) evalVarDecl(decl *ast.VarDecl) *sv.SV {
 	}
 
 	if len(decl.Names) == 1 {
+		// Special handling for hash: convert list to hash
+		if _, ok := decl.Names[0].(*ast.HashVar); ok {
+			// Handle both array and array ref
+			var data []*sv.SV
+			if value.IsArray() {
+				data = value.ArrayData()
+			} else if value.IsRef() {
+				deref := value.Deref()
+				if deref != nil && deref.IsArray() {
+					data = deref.ArrayData()
+				}
+			}
+			if data != nil {
+				hashSV := sv.NewHashRef().Deref()
+				for j := 0; j+1 < len(data); j += 2 {
+					key := data[j].AsString()
+					val := data[j+1]
+					hashSV.HashData()[key] = val
+				}
+				value = hashSV
+			}
+		}
 		i.assignToVar(decl.Names[0], value, decl.Kind)
 	}
 	return value
@@ -278,6 +312,9 @@ func (i *Interpreter) evalReturnStmt(stmt *ast.ReturnStmt) *sv.SV {
 // ============================================================
 
 func (i *Interpreter) evalExpression(expr ast.Expression) *sv.SV {
+	// fmt.Printf("DEBUG @_: %v\n", expr)
+	// fmt.Printf("DEBUG @_: %T\n", expr)
+
 	if expr == nil {
 		return sv.NewUndef()
 	}
@@ -297,6 +334,11 @@ func (i *Interpreter) evalExpression(expr ast.Expression) *sv.SV {
 	case *ast.ScalarVar:
 		return i.ctx.GetVar(e.Name)
 	case *ast.ArrayVar:
+		if e.Name == "_" {
+			result := i.ctx.GetArgs()
+			//fmt.Printf("DEBUG @_: IsArray=%v, len=%d\n", result.IsArray(), len(result.ArrayData()))
+			return result
+		}
 		return i.ctx.GetVar(e.Name)
 	case *ast.HashVar:
 		return i.ctx.GetVar(e.Name)
@@ -531,6 +573,22 @@ func (i *Interpreter) evalHashExpr(expr *ast.HashExpr) *sv.SV {
 }
 
 func (i *Interpreter) evalArrayAccess(expr *ast.ArrayAccess) *sv.SV {
+	// Special case: $_[n] means @_[n] (argument access)
+	// fmt.Printf("DEBUG evalArrayAccess: Array type=%T\n", expr.Array)
+	// if sv, ok := expr.Array.(*ast.ScalarVar); ok {
+	// 	fmt.Printf("DEBUG evalArrayAccess: ScalarVar name=%s\n", sv.Name)
+	// }
+	if sv, ok := expr.Array.(*ast.SpecialVar); ok && sv.Name == "$_" {
+		//fmt.Printf("DEBUG evalArrayAccess: SpecialVar name=%s\n", sv.Name)
+		array := i.ctx.GetArgs()
+		//fmt.Printf("DEBUG evalArrayAccess: array.IsArray()=%v, len=%d\n", array.IsArray(), len(array.ArrayData()))
+		index := i.evalExpression(expr.Index)
+		//fmt.Printf("DEBUG evalArrayAccess: index=%d\n", index.AsInt())
+		result := av.Fetch(array, index)
+		//fmt.Printf("DEBUG evalArrayAccess: result=%v\n", result.AsString())
+		return result
+	}
+
 	array := i.evalExpression(expr.Array)
 	index := i.evalExpression(expr.Index)
 	return av.Fetch(array, index)
@@ -637,6 +695,9 @@ func (i *Interpreter) evalRangeExpr(expr *ast.RangeExpr) *sv.SV {
 }
 
 func (i *Interpreter) evalSpecialVar(name string) *sv.SV {
+	if name == "@_" {
+		return i.ctx.GetArgs()
+	}
 	return i.ctx.GetSpecialVar(name)
 }
 
@@ -711,6 +772,11 @@ func (i *Interpreter) callUserSub(name string, args []*sv.SV) *sv.SV {
 	defer i.ctx.PopScope()
 
 	i.ctx.SetArgs(args)
+	// DEBUG
+	// fmt.Printf("DEBUG callUserSub: %s with %d args\n", name, len(args))
+	// argsCheck := i.ctx.GetArgs()
+	// fmt.Printf("DEBUG GetArgs returned: IsArray=%v, len=%d\n", argsCheck.IsArray(), len(argsCheck.ArrayData()))
+
 	result := i.evalBlockStmt(body)
 
 	if i.ctx.HasReturn() {

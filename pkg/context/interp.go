@@ -127,7 +127,11 @@ func (c *Context) GetSub(name string) *ast.BlockStmt {
 
 // SetArgs sets @_ for current call.
 func (c *Context) SetArgs(args []*sv.SV) {
-	c.args = sv.NewArrayRef(args...)
+	ref := sv.NewArrayRef(args...)
+	//fmt.Printf("DEBUG SetArgs: ref.IsRef()=%v\n", ref.IsRef())
+	deref := ref.Deref()
+	//fmt.Printf("DEBUG SetArgs: deref=%v, deref.IsArray()=%v\n", deref != nil, deref != nil && deref.IsArray())
+	c.args = deref
 }
 
 // GetArgs returns @_ array.
@@ -135,6 +139,7 @@ func (c *Context) GetArgs() *sv.SV {
 	if c.args == nil {
 		c.args = sv.NewArrayRef()
 	}
+	//fmt.Printf("DEBUG GetArgs: args.IsArray()=%v\n", c.args.IsArray())
 	return c.args
 }
 

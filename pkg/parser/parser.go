@@ -412,6 +412,7 @@ func (p *Parser) ParseProgram() *ast.Program {
 // ============================================================
 
 func (p *Parser) parseStatement() ast.Statement {
+
 	switch p.curToken.Type {
 	case lexer.TokMy, lexer.TokOur, lexer.TokLocal, lexer.TokState:
 		return p.parseVarDecl()
@@ -490,6 +491,7 @@ func (p *Parser) parseBlockStmt() *ast.BlockStmt {
 // ============================================================
 
 func (p *Parser) parseExpression(precedence int) ast.Expression {
+
 	prefix := p.prefixParseFns[p.curToken.Type]
 	if prefix == nil {
 		p.noPrefixParseFnError(p.curToken.Type)
@@ -716,8 +718,41 @@ func (p *Parser) parseGroupedExpression() ast.Expression {
 
 	exp := p.parseExpression(LOWEST)
 
+	// Check for fat arrow - this means it's a hash-like list: (a => 1, b => 2)
+	// After parseExpression, we might be ON the fat arrow
+	if p.curTokenIs(lexer.TokFatArrow) {
+		// Parse as list of pairs, flattened into array
+		elements := []ast.Expression{}
+
+		// First key already parsed as exp
+		elements = append(elements, exp)
+		p.nextToken() // move to value
+		elements = append(elements, p.parseExpression(COMMA))
+
+		// More pairs
+		for p.peekTokenIs(lexer.TokComma) {
+			p.nextToken() // move to ,
+			if p.peekTokenIs(lexer.TokRParen) {
+				break // trailing comma
+			}
+			p.nextToken() // move to next key
+			key := p.parseExpression(COMMA)
+			elements = append(elements, key)
+
+			if p.peekTokenIs(lexer.TokFatArrow) {
+				p.nextToken() // move to =>
+				p.nextToken() // move to value
+				elements = append(elements, p.parseExpression(COMMA))
+			}
+		}
+
+		if !p.expectPeek(lexer.TokRParen) {
+			return nil
+		}
+		return &ast.ArrayExpr{Token: startToken, Elements: elements}
+	}
+
 	// Check for list: (1, 2, 3)
-	// Liste kontrol et: (1, 2, 3)
 	if p.peekTokenIs(lexer.TokComma) {
 		elements := []ast.Expression{exp}
 		for p.peekTokenIs(lexer.TokComma) {
@@ -822,6 +857,7 @@ func (p *Parser) parseCallExpression(function ast.Expression) ast.Expression {
 }
 
 func (p *Parser) parseExpressionList(end lexer.TokenType) []ast.Expression {
+
 	list := []ast.Expression{}
 
 	if p.peekTokenIs(end) {
@@ -1452,7 +1488,6 @@ func (p *Parser) parseBuiltinCall() ast.Expression {
 
 	// Check for parentheses
 	if p.peekTokenIs(lexer.TokLParen) {
-		p.nextToken()
 		p.nextToken()
 		expr.Args = p.parseExpressionList(lexer.TokRParen)
 	} else {

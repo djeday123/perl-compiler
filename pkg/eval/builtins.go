@@ -329,6 +329,19 @@ func (i *Interpreter) builtinExit(args []*sv.SV) *sv.SV {
 }
 
 func (i *Interpreter) builtinScalar(args []*sv.SV) *sv.SV {
+	// fmt.Printf("DEBUG builtinScalar: len(args)=%d\n", len(args))
+	// if len(args) > 0 && args[0] != nil {
+	// 	fmt.Printf("DEBUG builtinScalar: args[0].IsArray()=%v, args[0].IsRef()=%v\n",
+	// 		args[0].IsArray(), args[0].IsRef())
+	// } else if len(args) > 0 {
+	// 	fmt.Println("DEBUG builtinScalar: args[0] is nil!")
+	// }
+
+	// if len(args) > 0 && args[0] != nil {
+	// 	fmt.Printf("DEBUG builtinScalar: IsArray=%v, IsRef=%v, IsHash=%v, AsString=%q\n",
+	// 		args[0].IsArray(), args[0].IsRef(), args[0].IsHash(), args[0].AsString())
+	// }
+
 	if len(args) == 0 {
 		return sv.NewUndef()
 	}
