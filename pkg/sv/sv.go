@@ -663,6 +663,37 @@ func (sv *SV) Copy() *SV {
 	return cp
 }
 
+// CopyFrom copies the value from another SV into this one
+func (sv *SV) CopyFrom(src *SV) {
+	if sv == nil || src == nil {
+		return
+	}
+	sv.checkWritable()
+
+	sv.typ = src.typ
+	sv.flags = src.flags &^ (FlagRO | FlagTemp)
+	sv.iv = src.iv
+	sv.nv = src.nv
+	sv.pv = src.pv
+	sv.pvUTF8 = src.pvUTF8
+	sv.stash = src.stash
+
+	// Handle reference
+	if sv.rv != nil {
+		sv.rv.DecRef()
+	}
+	if src.rv != nil {
+		sv.rv = src.rv
+		sv.rv.IncRef()
+	} else {
+		sv.rv = nil
+	}
+
+	// Share array/hash data
+	sv.av = src.av
+	sv.hv = src.hv
+}
+
 // ============================================================
 // Debug
 // ============================================================

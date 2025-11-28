@@ -338,7 +338,6 @@ func (i *Interpreter) evalExpression(expr ast.Expression) *sv.SV {
 	case *ast.ArrayVar:
 		if e.Name == "_" {
 			result := i.ctx.GetArgs()
-			//fmt.Printf("DEBUG @_: IsArray=%v, len=%d\n", result.IsArray(), len(result.ArrayData()))
 			return result
 		}
 		return i.ctx.GetVar(e.Name)
@@ -382,6 +381,8 @@ func (i *Interpreter) evalExpression(expr ast.Expression) *sv.SV {
 		return i.evalSubstExpr(e)
 	case *ast.ReadLineExpr:
 		return i.evalReadLineExpr(e)
+	case *ast.DerefExpr:
+		return i.evalDerefExpr(e)
 	default:
 		return sv.NewUndef()
 	}
@@ -576,18 +577,10 @@ func (i *Interpreter) evalHashExpr(expr *ast.HashExpr) *sv.SV {
 
 func (i *Interpreter) evalArrayAccess(expr *ast.ArrayAccess) *sv.SV {
 	// Special case: $_[n] means @_[n] (argument access)
-	// fmt.Printf("DEBUG evalArrayAccess: Array type=%T\n", expr.Array)
-	// if sv, ok := expr.Array.(*ast.ScalarVar); ok {
-	// 	fmt.Printf("DEBUG evalArrayAccess: ScalarVar name=%s\n", sv.Name)
-	// }
 	if sv, ok := expr.Array.(*ast.SpecialVar); ok && sv.Name == "$_" {
-		//fmt.Printf("DEBUG evalArrayAccess: SpecialVar name=%s\n", sv.Name)
 		array := i.ctx.GetArgs()
-		//fmt.Printf("DEBUG evalArrayAccess: array.IsArray()=%v, len=%d\n", array.IsArray(), len(array.ArrayData()))
 		index := i.evalExpression(expr.Index)
-		//fmt.Printf("DEBUG evalArrayAccess: index=%d\n", index.AsInt())
 		result := av.Fetch(array, index)
-		//fmt.Printf("DEBUG evalArrayAccess: result=%v\n", result.AsString())
 		return result
 	}
 
@@ -674,14 +667,125 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr) *sv.SV {
 		return i.builtinExit(args)
 	case "scalar":
 		return i.builtinScalar(args)
+	case "bless":
+		return i.builtinBless(expr.Args, args)
+	case "isa":
+		return i.builtinIsa(args)
+	case "can":
+		return i.builtinCan(args)
+	case "set_isa":
+		// Helper function: set_isa('Child', 'Parent1', 'Parent2', ...)
+		return i.builtinSetIsa(args)
 	}
 
 	return i.callUserSub(funcName, args)
 }
 
 func (i *Interpreter) evalMethodCall(expr *ast.MethodCall) *sv.SV {
-	_ = expr // TODO: implement OO method calls
+	// Evaluate the object/class
+	obj := i.evalExpression(expr.Object)
+
+	// Prepare arguments - first arg is always the invocant ($self or $class)
+	args := make([]*sv.SV, len(expr.Args)+1)
+	args[0] = obj
+	for idx, arg := range expr.Args {
+		args[idx+1] = i.evalExpression(arg)
+	}
+
+	// Determine the package/class name
+	var pkgName string
+
+	// If object is a blessed reference, get its package
+	if obj.IsRef() && obj.IsBlessed() {
+		pkgName = obj.Package()
+	} else if obj.IsRef() {
+		// Unblessed reference - error in strict mode
+		// For now, just return undef
+		return sv.NewUndef()
+	} else {
+		// Object might be a class name (string)
+		// e.g., ClassName->new()
+		pkgName = obj.AsString()
+	}
+
+	// Find the method in the package
+	methodName := expr.Method
+
+	// Special handling for SUPER::
+	superCall := false
+	if strings.HasPrefix(methodName, "SUPER::") {
+		methodName = strings.TrimPrefix(methodName, "SUPER::")
+		superCall = true
+	}
+
+	var fullName string
+	if superCall {
+		// For SUPER:: calls, start search from parent classes
+		parents := i.ctx.GetPackageISA(pkgName)
+		for _, parent := range parents {
+			if found := i.ctx.FindMethod(parent, methodName); found != "" {
+				fullName = found
+				break
+			}
+		}
+	} else {
+		// Normal method resolution - search class and @ISA
+		fullName = i.ctx.FindMethod(pkgName, methodName)
+	}
+
+	if fullName != "" {
+		return i.callSubWithArgs(fullName, args)
+	}
+
+	// Try just the method name (for main:: methods)
+	if body := i.ctx.GetSub(methodName); body != nil {
+		return i.callSubWithArgs(methodName, args)
+	}
+
+	// TODO: AUTOLOAD support
+
+	// Method not found
 	return sv.NewUndef()
+}
+
+func (i *Interpreter) callSubWithArgs(name string, args []*sv.SV) *sv.SV {
+	body := i.ctx.GetSub(name)
+	if body == nil {
+		return sv.NewUndef()
+	}
+
+	// Save current args and set new args
+	oldArgs := i.ctx.GetArgs()
+	i.ctx.SetArgs(args)
+
+	// Create new scope
+	i.ctx.PushScope()
+	defer i.ctx.PopScope()
+	defer i.ctx.ClearReturn()
+	defer func() { i.ctx.SetArgs(oldArgs.ArrayData()) }()
+
+	// Execute body
+	var result *sv.SV
+	for _, stmt := range body.Statements {
+		result = i.evalStatement(stmt)
+		if i.ctx.HasReturn() {
+			result = i.ctx.ReturnValue()
+			break
+		}
+	}
+
+	if result == nil {
+		return sv.NewUndef()
+	}
+	return result
+}
+
+func (i *Interpreter) evalDerefExpr(expr *ast.DerefExpr) *sv.SV {
+	ref := i.evalExpression(expr.Value)
+	if ref == nil {
+		return sv.NewUndef()
+	}
+	return ref.Deref()
 }
 
 func (i *Interpreter) evalRefExpr(expr *ast.RefExpr) *sv.SV {
@@ -719,6 +823,30 @@ func (i *Interpreter) assignBack(expr ast.Expression, value *sv.SV) {
 		hash := i.evalExpression(v.Hash)
 		key := i.evalExpression(v.Key)
 		hv.Store(hash, key, value)
+	case *ast.ArrowAccess:
+		// $ref->[index] = ... or $ref->{key} = ...
+		left := i.evalExpression(v.Left)
+		target := left
+		if left.IsRef() {
+			target = left.Deref()
+		}
+		switch right := v.Right.(type) {
+		case *ast.ArrayAccess:
+			idx := i.evalExpression(right.Index)
+			av.Store(target, idx, value)
+		case *ast.HashAccess:
+			key := i.evalExpression(right.Key)
+			hv.Store(target, key, value)
+		}
+	case *ast.DerefExpr:
+		// $$ref = value - assign to dereferenced scalar
+		ref := i.evalExpression(v.Value)
+		if ref != nil && ref.IsRef() {
+			target := ref.Deref()
+			if target != nil {
+				target.CopyFrom(value)
+			}
+		}
 	}
 }
 
@@ -774,10 +902,6 @@ func (i *Interpreter) callUserSub(name string, args []*sv.SV) *sv.SV {
 	defer i.ctx.PopScope()
 
 	i.ctx.SetArgs(args)
-	// DEBUG
-	// fmt.Printf("DEBUG callUserSub: %s with %d args\n", name, len(args))
-	// argsCheck := i.ctx.GetArgs()
-	// fmt.Printf("DEBUG GetArgs returned: IsArray=%v, len=%d\n", argsCheck.IsArray(), len(argsCheck.ArrayData()))
 
 	result := i.evalBlockStmt(body)
 

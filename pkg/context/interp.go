@@ -18,6 +18,8 @@ type Context struct {
 	// Subroutines
 	subs map[string]*ast.BlockStmt
 
+	// Package @ISA arrays (для наследования)
+	packageISA map[string][]string
 	// Arguments @_
 	args *sv.SV
 
@@ -52,6 +54,7 @@ func New() *Context {
 		runtime:     GetRuntime(),
 		scopes:      []map[string]*sv.SV{make(map[string]*sv.SV)},
 		subs:        make(map[string]*ast.BlockStmt),
+		packageISA:  make(map[string][]string),
 		filehandles: make(map[string]*FileHandle),
 	}
 }
@@ -108,6 +111,49 @@ func (c *Context) PopScope() {
 }
 
 // ============================================================
+// Inheritance Management
+// ============================================================
+
+// SetPackageISA sets the @ISA for a package.
+func (c *Context) SetPackageISA(pkg string, parents []string) {
+	c.packageISA[pkg] = parents
+}
+
+// GetPackageISA returns the @ISA for a package.
+func (c *Context) GetPackageISA(pkg string) []string {
+	return c.packageISA[pkg]
+}
+
+// FindMethod searches for a method in the class hierarchy.
+// Returns the full method name (Package::method) if found.
+func (c *Context) FindMethod(pkg, method string) string {
+	return c.findMethodRecursive(pkg, method, make(map[string]bool))
+}
+
+func (c *Context) findMethodRecursive(pkg, method string, visited map[string]bool) string {
+	// Prevent infinite loops in circular @ISA
+	if visited[pkg] {
+		return ""
+	}
+	visited[pkg] = true
+
+	// Try direct method
+	fullName := pkg + "::" + method
+	if c.subs[fullName] != nil {
+		return fullName
+	}
+
+	// Search in parent classes (@ISA)
+	for _, parent := range c.packageISA[pkg] {
+		if found := c.findMethodRecursive(parent, method, visited); found != "" {
+			return found
+		}
+	}
+
+	return ""
+}
+
+// ============================================================
 // Subroutine Management
 // ============================================================
 
@@ -128,9 +174,7 @@ func (c *Context) GetSub(name string) *ast.BlockStmt {
 // SetArgs sets @_ for current call.
 func (c *Context) SetArgs(args []*sv.SV) {
 	ref := sv.NewArrayRef(args...)
-	//fmt.Printf("DEBUG SetArgs: ref.IsRef()=%v\n", ref.IsRef())
 	deref := ref.Deref()
-	//fmt.Printf("DEBUG SetArgs: deref=%v, deref.IsArray()=%v\n", deref != nil, deref != nil && deref.IsArray())
 	c.args = deref
 }
 
@@ -139,7 +183,6 @@ func (c *Context) GetArgs() *sv.SV {
 	if c.args == nil {
 		c.args = sv.NewArrayRef()
 	}
-	//fmt.Printf("DEBUG GetArgs: args.IsArray()=%v\n", c.args.IsArray())
 	return c.args
 }
 

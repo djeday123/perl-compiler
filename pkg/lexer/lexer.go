@@ -626,7 +626,22 @@ func (l *Lexer) readScalar() Token {
 	// Special variables: $_, $@, $!, $$, etc.
 	// Özel değişkenler: $_, $@, $!, $$, vb.
 	switch l.ch {
-	case '_', '@', '!', '$', '?', '"', '/', '\\', '&', '`', '\'', '+', '.', '|', '-', '^', '~', '=', '%', ':':
+	case '$':
+		// Check if this is $$var (dereference) or $$ (PID)
+		if isIdentStart(l.peekChar()) {
+			// $$var - scalar dereference
+			l.readChar() // skip second $
+			name := l.readIdentName()
+			tok.Type = TokScalar
+			tok.Value = "$$" + name
+			return tok
+		}
+		// $$ alone - PID special variable
+		tok.Type = TokSpecialVar
+		tok.Value = "$$"
+		l.readChar()
+		return tok
+	case '_', '@', '!', '?', '"', '/', '\\', '&', '`', '\'', '+', '.', '|', '-', '^', '~', '=', '%', ':':
 		tok.Type = TokSpecialVar
 		tok.Value = "$" + string(l.ch)
 		l.readChar()

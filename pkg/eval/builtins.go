@@ -14,11 +14,6 @@ import (
 )
 
 func (i *Interpreter) builtinPrint(expr *ast.CallExpr) *sv.SV {
-	// Debug
-	//fmt.Fprintf(os.Stderr, "DEBUG print: %d args\n", len(expr.Args))
-	// for idx, arg := range expr.Args {
-	// 	fmt.Fprintf(os.Stderr, "  arg[%d]: %T = %s\n", idx, arg, arg.String())
-	// }
 	// Check if first arg is filehandle
 	if len(expr.Args) >= 2 {
 		if fhVar, ok := expr.Args[0].(*ast.ScalarVar); ok {
@@ -329,18 +324,6 @@ func (i *Interpreter) builtinExit(args []*sv.SV) *sv.SV {
 }
 
 func (i *Interpreter) builtinScalar(args []*sv.SV) *sv.SV {
-	fmt.Printf("DEBUG builtinScalar: len(args)=%d\n", len(args))
-	if len(args) > 0 && args[0] != nil {
-		fmt.Printf("DEBUG builtinScalar: args[0].IsArray()=%v, args[0].IsRef()=%v\n",
-			args[0].IsArray(), args[0].IsRef())
-	} else if len(args) > 0 {
-		fmt.Println("DEBUG builtinScalar: args[0] is nil!")
-	}
-
-	if len(args) > 0 && args[0] != nil {
-		fmt.Printf("DEBUG builtinScalar: IsArray=%v, IsRef=%v, IsHash=%v, AsString=%q\n",
-			args[0].IsArray(), args[0].IsRef(), args[0].IsHash(), args[0].AsString())
-	}
 
 	if len(args) == 0 {
 		return sv.NewUndef()
@@ -356,4 +339,105 @@ func (i *Interpreter) builtinScalar(args []*sv.SV) *sv.SV {
 		return sv.NewInt(int64(len(args[0].ArrayData())))
 	}
 	return args[0]
+}
+
+// ============================================================
+// OOP Built-ins
+// ============================================================
+
+// builtinBless implements bless($ref, $class)
+// Returns the blessed reference
+func (i *Interpreter) builtinBless(exprs []ast.Expression, args []*sv.SV) *sv.SV {
+	_ = exprs
+	if len(args) == 0 {
+		return sv.NewUndef()
+	}
+
+	ref := args[0]
+	if !ref.IsRef() {
+		// Can only bless references
+		return sv.NewUndef()
+	}
+
+	// Get package name - default to current package or caller's package
+	pkgName := "main"
+	if len(args) >= 2 {
+		pkgName = args[1].AsString()
+	}
+
+	// Bless the reference into the package
+	ref.Bless(pkgName)
+	return ref
+}
+
+// builtinIsa implements $obj->isa('ClassName') or UNIVERSAL::isa($obj, 'ClassName')
+// Returns true if $obj is a member of ClassName
+func (i *Interpreter) builtinIsa(args []*sv.SV) *sv.SV {
+	if len(args) < 2 {
+		return sv.NewInt(0)
+	}
+
+	obj := args[0]
+	className := args[1].AsString()
+
+	// Check if object is blessed
+	if !obj.IsRef() || !obj.IsBlessed() {
+		return sv.NewInt(0)
+	}
+
+	// Direct class check
+	if obj.Package() == className {
+		return sv.NewInt(1)
+	}
+
+	// TODO: Check @ISA inheritance chain
+	return sv.NewInt(0)
+}
+
+// builtinCan implements $obj->can('method') or UNIVERSAL::can($obj, 'method')
+// Returns coderef if $obj can do method, undef otherwise
+func (i *Interpreter) builtinCan(args []*sv.SV) *sv.SV {
+	if len(args) < 2 {
+		return sv.NewUndef()
+	}
+
+	obj := args[0]
+	methodName := args[1].AsString()
+
+	var pkgName string
+	if obj.IsRef() && obj.IsBlessed() {
+		pkgName = obj.Package()
+	} else {
+		// Assume it's a class name
+		pkgName = obj.AsString()
+	}
+
+	// Try to find the method using FindMethod (includes @ISA)
+	if found := i.ctx.FindMethod(pkgName, methodName); found != "" {
+		return sv.NewInt(1)
+	}
+
+	// Try just the method name
+	if i.ctx.GetSub(methodName) != nil {
+		return sv.NewInt(1)
+	}
+
+	return sv.NewUndef()
+}
+
+// builtinSetIsa sets the @ISA for a package
+// set_isa('Child', 'Parent1', 'Parent2', ...)
+func (i *Interpreter) builtinSetIsa(args []*sv.SV) *sv.SV {
+	if len(args) < 2 {
+		return sv.NewInt(0)
+	}
+
+	pkg := args[0].AsString()
+	parents := make([]string, len(args)-1)
+	for idx, arg := range args[1:] {
+		parents[idx] = arg.AsString()
+	}
+
+	i.ctx.SetPackageISA(pkg, parents)
+	return sv.NewInt(1)
 }

@@ -72,6 +72,18 @@ func (g *Generator) Generate(program *ast.Program) string {
 		g.writeln("")
 	}
 
+	// Generate init function to register methods
+	g.writeln("func init() {")
+	g.indent++
+	for _, sub := range subs {
+		// Register each subroutine as a potential method
+		funcName := "perl_" + strings.ReplaceAll(sub.Name, "::", "_")
+		g.writeln(fmt.Sprintf("perl_register_method(%q, %s)", strings.ReplaceAll(sub.Name, "::", "_"), funcName))
+	}
+	g.indent--
+	g.writeln("}")
+	g.writeln("")
+
 	// Generate main function
 	g.writeln("func main() {")
 	g.indent++
@@ -327,14 +339,96 @@ func (g *Generator) writeRuntime() {
 		for _, el := range arr.av { parts = append(parts, el.AsString()) }
 		return svStr(strings.Join(parts, sep.AsString()))
 }`)
-	g.writeln(`func perl_ref(sv *SV) *SV {
-		if sv == nil { return svStr("") }
-		if sv.flags&SVf_AOK != 0 { return svStr("ARRAY") }
-		if sv.flags&SVf_HOK != 0 { return svStr("HASH") }
-		return svStr("")
+	g.writeln("")
+
+	g.writeln(`// OOP Support
+var _blessedPkg = make(map[*SV]string)
+var _packageISA = make(map[string][]string)
+var _methods = make(map[string]func(args ...*SV) *SV)
+
+func perl_register_method(name string, fn func(args ...*SV) *SV) {
+	_methods[name] = fn
+}
+
+func perl_bless(ref, class *SV) *SV {
+	_blessedPkg[ref] = class.AsString()
+	return ref
+}
+
+func perl_ref(sv *SV) *SV {
+	if sv == nil { return svStr("") }
+	if pkg, ok := _blessedPkg[sv]; ok { return svStr(pkg) }
+	if sv.flags&SVf_AOK != 0 { return svStr("ARRAY") }
+	if sv.flags&SVf_HOK != 0 { return svStr("HASH") }
+	return svStr("")
+}
+
+func perl_set_isa(child *SV, parents ...*SV) *SV {
+	childName := child.AsString()
+	var parentNames []string
+	for _, p := range parents {
+		parentNames = append(parentNames, p.AsString())
+	}
+	_packageISA[childName] = parentNames
+	return svInt(1)
+}
+
+func perl_method_call(obj *SV, method string, args ...*SV) *SV {
+	var pkg string
+	
+	// Check if obj is a class name (string) or blessed reference
+	if obj.flags&SVf_POK != 0 && _blessedPkg[obj] == "" {
+		// Class method call: Point->new()
+		pkg = obj.AsString()
+	} else if p, ok := _blessedPkg[obj]; ok {
+		// Instance method call: $obj->method()
+		pkg = p
+	} else {
+		return svUndef()
+	}
+	
+	// Search for method in class hierarchy
+	fullArgs := append([]*SV{obj}, args...)
+	return perl_find_and_call(pkg, method, fullArgs)
+}
+
+func perl_find_and_call(pkg, method string, args []*SV) *SV {
+	// Try this package first
+	key := pkg + "_" + method
+	if fn, ok := _methods[key]; ok {
+		return fn(args...)
+	}
+	
+	// Try parent classes
+	for _, parent := range _packageISA[pkg] {
+		result := perl_find_and_call(parent, method, args)
+		if result != nil {
+			return result
+		}
+	}
+	
+	return svUndef()
+}
+
+func perl_isa(obj, class *SV) *SV {
+	pkg, ok := _blessedPkg[obj]
+	if !ok { return svInt(0) }
+	target := class.AsString()
+	if pkg == target { return svInt(1) }
+	return perl_isa_check(pkg, target)
+}
+
+func perl_isa_check(pkg, target string) *SV {
+	if pkg == target { return svInt(1) }
+	for _, parent := range _packageISA[pkg] {
+		if perl_isa_check(parent, target).IsTrue() { return svInt(1) }
+	}
+	return svInt(0)
 }`)
 	g.writeln("")
 
+	// File I/O
+	// File I/O - добавь _filehandles ПЕРЕД perlOpen
 	g.writeln("var _filehandles = make(map[string]*_FileHandle)")
 	g.writeln("")
 	g.writeln(`type _FileHandle struct {
@@ -343,6 +437,7 @@ func (g *Generator) writeRuntime() {
 	writer  *bufio.Writer
 }`)
 	g.writeln("")
+
 	g.writeln(`func perlOpen(name, mode, filename string) *SV {
 	var file *os.File
 	var err error
@@ -551,9 +646,11 @@ func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
 }
 
 func (g *Generator) generateSubDecl(sub *ast.SubDecl) {
-	g.write("func perl_" + sub.Name + "(args ...*SV) *SV {\n")
+	g.write("func perl_" + strings.ReplaceAll(sub.Name, "::", "_") + "(args ...*SV) *SV {\n")
 	g.indent++
 	g.writeln("_ = args")
+	g.writeln("_args := svArray(args...)") // Создаём один массив для @_
+	g.writeln("_ = _args")                 // Предотвращаем ошибку "declared and not used"
 
 	// Generate body
 	for _, stmt := range sub.Body.Statements {
@@ -787,6 +884,8 @@ func (g *Generator) generateExpression(expr ast.Expression) {
 		g.write(")")
 	case *ast.ArrowAccess:
 		g.generateArrowAccess(e)
+	case *ast.MethodCall:
+		g.generateMethodCall(e)
 	case *ast.Identifier:
 		g.write(fmt.Sprintf("svStr(%q)", e.Value))
 	case *ast.RangeExpr:
@@ -846,6 +945,62 @@ func (g *Generator) generatePostfixExpr(expr *ast.PostfixExpr) {
 			name := g.scalarName(v.Name)
 			g.write("func() *SV { _t := " + name + "; " + name + " = svSub(" + name + ", svInt(1)); return _t }()")
 		}
+	}
+}
+
+func (g *Generator) generateMethodCall(e *ast.MethodCall) {
+	g.write("perl_method_call(")
+	g.generateExpression(e.Object)
+	g.write(fmt.Sprintf(", %q", e.Method))
+	for _, arg := range e.Args {
+		g.write(", ")
+		g.generateExpression(arg)
+	}
+	g.write(")")
+}
+
+func (g *Generator) GenerateMethodCall_test(e *ast.MethodCall) {
+	// Get the class/object
+	// For Class->method(): Object is Identifier with class name
+	// For $obj->method(): Object is ScalarVar
+
+	var className string
+	var isClassMethod bool
+
+	switch obj := e.Object.(type) {
+	case *ast.Identifier:
+		// Class->method() - class method call
+		className = obj.Value
+		isClassMethod = true
+	case *ast.ScalarVar:
+		// $obj->method() - instance method call
+		isClassMethod = false
+	}
+
+	// Generate function call
+	methodName := strings.ReplaceAll(e.Method, "::", "_")
+
+	if isClassMethod {
+		// Class->new() becomes perl_Class_new(svStr("Class"), args...)
+		g.write("perl_" + strings.ReplaceAll(className, "::", "_") + "_" + methodName + "(")
+		g.write(fmt.Sprintf("svStr(%q)", className))
+		for _, arg := range e.Args {
+			g.write(", ")
+			g.generateExpression(arg)
+		}
+		g.write(")")
+	} else {
+		// $obj->method() - need to look up method based on blessed package
+		// For simplicity, we'll need runtime method dispatch
+		// For now, generate direct call if we know the type
+		g.write("perl_method_call(")
+		g.generateExpression(e.Object)
+		g.write(fmt.Sprintf(", %q", e.Method))
+		for _, arg := range e.Args {
+			g.write(", ")
+			g.generateExpression(arg)
+		}
+		g.write(")")
 	}
 }
 
@@ -975,6 +1130,26 @@ func (g *Generator) generateAssignExpr(expr *ast.AssignExpr) {
 		g.write(", ")
 		g.generateExpression(expr.Right)
 		g.write(")")
+	case *ast.ArrowAccess:
+		// $ref->{"key"} = value or $ref->[idx] = value
+		switch acc := left.Right.(type) {
+		case *ast.HashAccess:
+			g.write("svHSet(")
+			g.generateExpression(left.Left)
+			g.write(", ")
+			g.generateExpression(acc.Key)
+			g.write(", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		case *ast.ArrayAccess:
+			g.write("svASet(")
+			g.generateExpression(left.Left)
+			g.write(", ")
+			g.generateExpression(acc.Index)
+			g.write(", ")
+			g.generateExpression(expr.Right)
+			g.write(")")
+		}
 	}
 }
 
@@ -1058,7 +1233,7 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 					return
 				}
 			}
-			g.write("svShift(svArray(args...))")
+			g.write("svShift(_args)")
 		case "unshift":
 			if len(expr.Args) >= 1 {
 				if av, ok := expr.Args[0].(*ast.ArrayVar); ok {
@@ -1165,7 +1340,8 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 			}
 		default:
 			// User-defined function
-			g.write("perl_" + name + "(")
+			//g.write("perl_" + name + "(")
+			g.write("perl_" + strings.ReplaceAll(name, "::", "_") + "(")
 			for i, a := range expr.Args {
 				if i > 0 {
 					g.write(", ")

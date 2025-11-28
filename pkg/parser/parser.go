@@ -348,8 +348,8 @@ func (p *Parser) peekError(t lexer.TokenType) {
 }
 
 func (p *Parser) noPrefixParseFnError(t lexer.TokenType) {
-	msg := fmt.Sprintf("line %d: no prefix parse function for %v found",
-		p.curToken.Line, t)
+	msg := fmt.Sprintf("line %d: no prefix parse function for %v found (value=%q, peek=%v/%q)",
+		p.curToken.Line, t, p.curToken.Value, p.peekToken.Type, p.peekToken.Value)
 	p.errors = append(p.errors, msg)
 }
 
@@ -455,17 +455,48 @@ func (p *Parser) parseStatement() ast.Statement {
 	}
 }
 
-func (p *Parser) parseExpressionStatement() *ast.ExprStmt {
-	stmt := &ast.ExprStmt{Token: p.curToken}
-	stmt.Expression = p.parseExpression(LOWEST)
+func (p *Parser) parseExpressionStatement() ast.Statement {
+	exprStmt := &ast.ExprStmt{Token: p.curToken}
+	exprStmt.Expression = p.parseExpression(LOWEST)
+
+	// Check for statement modifiers: expr if COND, expr unless COND
+	if p.peekTokenIs(lexer.TokIf) {
+		p.nextToken() // consume 'if'
+		p.nextToken() // move to condition
+		cond := p.parseExpression(LOWEST)
+		ifStmt := &ast.IfStmt{
+			Token:     p.curToken,
+			Condition: cond,
+			Then:      &ast.BlockStmt{Statements: []ast.Statement{exprStmt}},
+		}
+		if p.peekTokenIs(lexer.TokSemi) {
+			p.nextToken()
+		}
+		return ifStmt
+	}
+
+	if p.peekTokenIs(lexer.TokUnless) {
+		p.nextToken() // consume 'unless'
+		p.nextToken() // move to condition
+		cond := p.parseExpression(LOWEST)
+		ifStmt := &ast.IfStmt{
+			Token:     p.curToken,
+			Condition: cond,
+			Unless:    true,
+			Then:      &ast.BlockStmt{Statements: []ast.Statement{exprStmt}},
+		}
+		if p.peekTokenIs(lexer.TokSemi) {
+			p.nextToken()
+		}
+		return ifStmt
+	}
 
 	// Optional semicolon
-	// Opsiyonel noktalı virgül
 	if p.peekTokenIs(lexer.TokSemi) {
 		p.nextToken()
 	}
 
-	return stmt
+	return exprStmt
 }
 
 func (p *Parser) parseBlockStmt() *ast.BlockStmt {
@@ -586,6 +617,18 @@ func (p *Parser) parseUndef() ast.Expression {
 func (p *Parser) parseScalarVar() ast.Expression {
 	name := p.curToken.Value
 	name = strings.TrimPrefix(name, "$")
+
+	// Check for scalar dereference: $$ref
+	if strings.HasPrefix(name, "$") {
+		// This is $$ref - dereference
+		innerName := strings.TrimPrefix(name, "$")
+		innerVar := &ast.ScalarVar{Token: p.curToken, Name: innerName}
+		return &ast.DerefExpr{Token: p.curToken, Sigil: "$", Value: innerVar}
+	}
+
+	// Check for array dereference: $@ref -> @$ref parsed differently
+	// Check for hash dereference: $%ref -> %$ref parsed differently
+
 	return &ast.ScalarVar{Token: p.curToken, Name: name}
 }
 
@@ -716,40 +759,17 @@ func (p *Parser) parseGroupedExpression() ast.Expression {
 		return &ast.ArrayExpr{Token: startToken, Elements: []ast.Expression{}}
 	}
 
+	// Check if this is a hash-like list with bareword keys: (x => 1, y => 2)
+	// If current token is followed by =>, treat it as bareword key
+	if p.peekTokenIs(lexer.TokFatArrow) {
+		return p.parseHashLikeList(startToken)
+	}
+
 	exp := p.parseExpression(LOWEST)
 
 	// Check for fat arrow - this means it's a hash-like list: (a => 1, b => 2)
-	// After parseExpression, we might be ON the fat arrow
-	if p.curTokenIs(lexer.TokFatArrow) {
-		// Parse as list of pairs, flattened into array
-		elements := []ast.Expression{}
-
-		// First key already parsed as exp
-		elements = append(elements, exp)
-		p.nextToken() // move to value
-		elements = append(elements, p.parseExpression(COMMA))
-
-		// More pairs
-		for p.peekTokenIs(lexer.TokComma) {
-			p.nextToken() // move to ,
-			if p.peekTokenIs(lexer.TokRParen) {
-				break // trailing comma
-			}
-			p.nextToken() // move to next key
-			key := p.parseExpression(COMMA)
-			elements = append(elements, key)
-
-			if p.peekTokenIs(lexer.TokFatArrow) {
-				p.nextToken() // move to =>
-				p.nextToken() // move to value
-				elements = append(elements, p.parseExpression(COMMA))
-			}
-		}
-
-		if !p.expectPeek(lexer.TokRParen) {
-			return nil
-		}
-		return &ast.ArrayExpr{Token: startToken, Elements: elements}
+	if p.curTokenIs(lexer.TokFatArrow) || p.peekTokenIs(lexer.TokFatArrow) {
+		return p.parseHashLikeListWithFirst(startToken, exp)
 	}
 
 	// Check for list: (1, 2, 3)
@@ -773,6 +793,83 @@ func (p *Parser) parseGroupedExpression() ast.Expression {
 		return nil
 	}
 	return exp
+}
+
+// parseHashLikeList parses (x => 1, y => 2) where first token is bareword
+func (p *Parser) parseHashLikeList(startToken lexer.Token) ast.Expression {
+	elements := []ast.Expression{}
+
+	for !p.curTokenIs(lexer.TokRParen) && !p.curTokenIs(lexer.TokEOF) {
+		// Current token is the key (bareword or expression)
+		var key ast.Expression
+		if p.peekTokenIs(lexer.TokFatArrow) {
+			// Bareword key - treat current token value as string
+			key = &ast.StringLiteral{Token: p.curToken, Value: p.curToken.Value}
+		} else {
+			key = p.parseExpression(COMMA)
+		}
+		elements = append(elements, key)
+
+		if !p.peekTokenIs(lexer.TokFatArrow) {
+			break
+		}
+		p.nextToken() // move to =>
+		p.nextToken() // move to value
+		elements = append(elements, p.parseExpression(COMMA))
+
+		if p.peekTokenIs(lexer.TokComma) {
+			p.nextToken() // move to ,
+			if p.peekTokenIs(lexer.TokRParen) {
+				break // trailing comma
+			}
+			p.nextToken() // move to next key
+		}
+	}
+
+	if !p.expectPeek(lexer.TokRParen) {
+		return nil
+	}
+	return &ast.ArrayExpr{Token: startToken, Elements: elements}
+}
+
+// parseHashLikeListWithFirst continues parsing hash-like list when first element already parsed
+func (p *Parser) parseHashLikeListWithFirst(startToken lexer.Token, firstKey ast.Expression) ast.Expression {
+	elements := []ast.Expression{firstKey}
+
+	// We're on or before =>
+	if p.peekTokenIs(lexer.TokFatArrow) {
+		p.nextToken() // move to =>
+	}
+	p.nextToken() // move to value
+	elements = append(elements, p.parseExpression(COMMA))
+
+	// More pairs
+	for p.peekTokenIs(lexer.TokComma) {
+		p.nextToken() // move to ,
+		if p.peekTokenIs(lexer.TokRParen) {
+			break // trailing comma
+		}
+		p.nextToken() // move to next key
+
+		var key ast.Expression
+		if p.peekTokenIs(lexer.TokFatArrow) {
+			key = &ast.StringLiteral{Token: p.curToken, Value: p.curToken.Value}
+		} else {
+			key = p.parseExpression(COMMA)
+		}
+		elements = append(elements, key)
+
+		if p.peekTokenIs(lexer.TokFatArrow) {
+			p.nextToken() // move to =>
+			p.nextToken() // move to value
+			elements = append(elements, p.parseExpression(COMMA))
+		}
+	}
+
+	if !p.expectPeek(lexer.TokRParen) {
+		return nil
+	}
+	return &ast.ArrayExpr{Token: startToken, Elements: elements}
 }
 
 func (p *Parser) parseIndexExpression(left ast.Expression) ast.Expression {
@@ -815,9 +912,19 @@ func (p *Parser) parseArrowExpression(left ast.Expression) ast.Expression {
 			Right: &ast.ArrayAccess{Token: p.curToken, Index: index},
 		}
 	case lexer.TokLBrace:
-		// ->{}
+		// ->{} - need special handling for autoquoting barewords
 		p.nextToken()
-		key := p.parseExpression(LOWEST)
+		var key ast.Expression
+		// If it's a bare identifier or keyword, treat it as a string
+		if p.isBareword() {
+			key = &ast.StringLiteral{
+				Token:        p.curToken,
+				Value:        p.curToken.Value,
+				Interpolated: false,
+			}
+		} else {
+			key = p.parseExpression(LOWEST)
+		}
 		if !p.expectPeek(lexer.TokRBrace) {
 			return nil
 		}
@@ -972,6 +1079,17 @@ func (p *Parser) parseHashLiteral() ast.Expression {
 }
 
 func (p *Parser) parseHashPair() *ast.HashPair {
+	// Check if current token is a bareword followed by =>
+	// Treat word operators (x, eq, ne, etc.) as barewords in hash context
+	if p.peekTokenIs(lexer.TokFatArrow) {
+		// Current token is a bareword key
+		key := &ast.StringLiteral{Token: p.curToken, Value: p.curToken.Value}
+		p.nextToken() // move to =>
+		p.nextToken() // move to value
+		value := p.parseExpression(COMMA)
+		return &ast.HashPair{Key: key, Value: value}
+	}
+
 	key := p.parseExpression(COMMA + 1) // Higher than comma to stop at =>
 
 	// Expect =>
@@ -1510,6 +1628,56 @@ func (p *Parser) parsePrintCall(tok lexer.Token, name string) ast.Expression {
 	// Check for parentheses
 	if p.peekTokenIs(lexer.TokLParen) {
 		p.nextToken()
+		expr.Args = p.parseExpressionList(lexer.TokRParen)
+		return expr
+	}
+
+	p.nextToken()
+
+	// Check if first token is a scalar variable (potential filehandle)
+	// Filehandle form: print $fh "text" or print $fh $var
+	// But NOT: print $a + $b (that's an expression)
+	// Filehandle is followed by a string or another scalar (not an operator)
+	if p.curTokenIs(lexer.TokScalar) &&
+		(p.peekTokenIs(lexer.TokString) || p.peekTokenIs(lexer.TokRawString) ||
+			(p.peekTokenIs(lexer.TokScalar) && !p.isOperatorToken(p.peekToken.Type))) {
+		// This is filehandle form: print $fh "text" or print $fh $var
+		fhExpr := p.parseExpression(LOWEST)
+		expr.Args = append(expr.Args, fhExpr)
+		p.nextToken()
+		expr.Args = append(expr.Args, p.parseListExpression()...)
+		return expr
+	}
+
+	// Normal print - parse full expression list
+	expr.Args = p.parseListExpression()
+	return expr
+}
+
+// isOperatorToken checks if token is an operator
+func (p *Parser) isOperatorToken(t lexer.TokenType) bool {
+	switch t {
+	case lexer.TokPlus, lexer.TokMinus, lexer.TokStar, lexer.TokSlash,
+		lexer.TokPercent, lexer.TokStarStar, lexer.TokDot, lexer.TokX,
+		lexer.TokEq, lexer.TokNe, lexer.TokLt, lexer.TokLe, lexer.TokGt, lexer.TokGe,
+		lexer.TokStrEq, lexer.TokStrNe, lexer.TokStrLt, lexer.TokStrLe, lexer.TokStrGt, lexer.TokStrGe,
+		lexer.TokAnd, lexer.TokOr, lexer.TokAndWord, lexer.TokOrWord,
+		lexer.TokAssign, lexer.TokPlusEq, lexer.TokMinusEq,
+		lexer.TokArrow, lexer.TokComma, lexer.TokSemi:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Parser) RarsePrintCallComplex(tok lexer.Token, name string) ast.Expression {
+	expr := &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: name},
+	}
+
+	// Check for parentheses
+	if p.peekTokenIs(lexer.TokLParen) {
 		p.nextToken()
 		expr.Args = p.parseExpressionList(lexer.TokRParen)
 		return expr
@@ -1518,11 +1686,13 @@ func (p *Parser) parsePrintCall(tok lexer.Token, name string) ast.Expression {
 	p.nextToken()
 
 	// Check if first token is a scalar variable (potential filehandle)
-	if p.curTokenIs(lexer.TokScalar) {
+	// But NOT if it's followed by -> (that's arrow access, not filehandle)
+	if p.curTokenIs(lexer.TokScalar) && !p.peekTokenIs(lexer.TokArrow) {
+
 		fhExpr := p.parseExpression(CALL)
 
 		// Check if next token is expression (not comma, not semicolon) - filehandle form
-		if !p.peekTokenIs(lexer.TokComma) && !p.peekTokenIs(lexer.TokSemi) && !p.peekTokenIs(lexer.TokEOF) {
+		if !p.peekTokenIs(lexer.TokComma) && !p.peekTokenIs(lexer.TokSemi) && !p.peekTokenIs(lexer.TokEOF) && !p.peekTokenIs(lexer.TokArrow) {
 			expr.Args = append(expr.Args, fhExpr)
 			p.nextToken()
 			expr.Args = append(expr.Args, p.parseListExpression()...)
@@ -1539,6 +1709,40 @@ func (p *Parser) parsePrintCall(tok lexer.Token, name string) ast.Expression {
 	}
 
 	// Normal print without filehandle
+	expr.Args = p.parseListExpression()
+	return expr
+}
+
+func (p *Parser) RarsePrintCallComplex2(tok lexer.Token, name string) ast.Expression {
+	expr := &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: name},
+	}
+
+	// Check for parentheses
+	if p.peekTokenIs(lexer.TokLParen) {
+		p.nextToken()
+		expr.Args = p.parseExpressionList(lexer.TokRParen)
+		return expr
+	}
+
+	p.nextToken()
+
+	// Check if first token is a scalar variable (potential filehandle)
+	// Filehandle form: print $fh "text" (identifier after scalar, no operator)
+	if p.curTokenIs(lexer.TokScalar) && p.peekTokenIs(lexer.TokString) {
+		// This is filehandle form: print $fh "text"
+		fhExpr := p.parseExpression(CALL)
+
+		expr.Args = append(expr.Args, fhExpr)
+		p.nextToken()
+
+		expr.Args = append(expr.Args, p.parseListExpression()...)
+
+		return expr
+	}
+
+	// Normal print - parse full expression list
 	expr.Args = p.parseListExpression()
 	return expr
 }
@@ -1676,4 +1880,28 @@ func (p *Parser) parseListExpression() []ast.Expression {
 	}
 
 	return list
+}
+
+// isBareword returns true if current token can be used as a hash key bareword.
+// In Perl, keywords can be used as hash keys without quoting.
+func (p *Parser) isBareword() bool {
+	switch p.curToken.Type {
+	case lexer.TokIdent:
+		return true
+	// Keywords that can be used as barewords in hash keys
+	case lexer.TokX, lexer.TokIf, lexer.TokElse, lexer.TokFor, lexer.TokForeach,
+		lexer.TokWhile, lexer.TokMy, lexer.TokOur, lexer.TokLocal, lexer.TokSub,
+		lexer.TokUse, lexer.TokPackage, lexer.TokReturn, lexer.TokLast, lexer.TokNext,
+		lexer.TokStrEq, lexer.TokStrNe, lexer.TokStrLt, lexer.TokStrLe, lexer.TokStrGt, lexer.TokStrGe,
+		lexer.TokAndWord, lexer.TokOrWord, lexer.TokNotWord,
+		lexer.TokPrint, lexer.TokSay, lexer.TokDefined, lexer.TokUndef, lexer.TokRef,
+		lexer.TokLength, lexer.TokPush, lexer.TokPop, lexer.TokShift, lexer.TokUnshift,
+		lexer.TokKeys, lexer.TokValues, lexer.TokJoin, lexer.TokSplit,
+		lexer.TokAbs, lexer.TokInt, lexer.TokSqrt, lexer.TokChr, lexer.TokOrd,
+		lexer.TokLc, lexer.TokUc, lexer.TokChomp, lexer.TokChop,
+		lexer.TokOpen, lexer.TokClose, lexer.TokDie, lexer.TokWarn, lexer.TokExit:
+		return true
+	default:
+		return false
+	}
 }

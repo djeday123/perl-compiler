@@ -13,6 +13,17 @@ if (add(2, 3) == 5) {
     say "FAIL: sub with args";
 }
 
+sub calc {
+    my ($a, $b) = @_;
+    return $a + $b * 2;
+}
+
+if (calc(10, 3) == 16) {
+    say "PASS: expression in sub";
+} else {
+    say "FAIL: expression in sub";
+}
+
 sub factorial {
     my ($n) = @_;
     if ($n <= 1) {
