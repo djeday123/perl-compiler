@@ -670,6 +670,17 @@ func (p *Parser) parseIdentifier() ast.Expression {
 // ============================================================
 
 func (p *Parser) parsePrefixExpression() ast.Expression {
+	// Специальная обработка для \ (создание ссылки)
+	if p.curToken.Value == "\\" {
+		tok := p.curToken
+		p.nextToken()
+		right := p.parseExpression(UNARY)
+		return &ast.RefExpr{
+			Token: tok,
+			Value: right,
+		}
+	}
+
 	expression := &ast.PrefixExpr{
 		Token:    p.curToken,
 		Operator: p.curToken.Value,

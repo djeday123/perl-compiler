@@ -129,7 +129,7 @@ if ($shifted == 0 && scalar(@arr) == 3) {
 
 # === Negative array index ===
 say "=== Negative index ===";
-@arr = (1, 2, 3, 4, 5);
+my @arr = (1, 2, 3, 4, 5);
 if ($arr[-1] == 5 && $arr[-2] == 4) {
     say "PASS: negative index";
 } else {
@@ -147,7 +147,7 @@ if ($parts[0] eq "a" && $parts[1] eq "b" && $parts[2] eq "c") {
 
 # === Reverse ===
 say "=== Reverse ===";
-@arr = (1, 2, 3);
+my @arr = (1, 2, 3);
 my @rev = reverse(@arr);
 if ($rev[0] == 3 && $rev[2] == 1) {
     say "PASS: reverse";
@@ -157,7 +157,7 @@ if ($rev[0] == 3 && $rev[2] == 1) {
 
 # === Sort ===
 say "=== Sort ===";
-@arr = (3, 1, 2);
+my @arr = (3, 1, 2);
 my @sorted = sort(@arr);
 if ($sorted[0] == 1 && $sorted[2] == 3) {
     say "PASS: sort";
@@ -217,7 +217,7 @@ if ($val == 100) {
 
 # === Array ref with backslash ===
 say "=== Array ref backslash ===";
-@arr = (10, 20, 30);
+my @arr = (10, 20, 30);
 my $arr_ref = \@arr;
 if ($arr_ref->[1] == 20) {
     say "PASS: array ref backslash";
@@ -227,7 +227,7 @@ if ($arr_ref->[1] == 20) {
 
 # === Hash ref with backslash ===
 say "=== Hash ref backslash ===";
-%h = (x => 5, y => 10);
+my %h = (x => 5, y => 10);
 my $h_ref = \%h;
 if ($h_ref->{x} == 5) {
     say "PASS: hash ref backslash";

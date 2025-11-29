@@ -677,6 +677,14 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr) *sv.SV {
 	case "set_isa":
 		// Helper function: set_isa('Child', 'Parent1', 'Parent2', ...)
 		return i.builtinSetIsa(args)
+	case "reverse":
+		return i.builtinReverse(expr.Args, args)
+	case "sort":
+		return i.builtinSort(expr.Args, args)
+	case "exists":
+		return i.builtinExists(expr)
+	case "delete":
+		return i.builtinDelete(expr)
 	}
 
 	return i.callUserSub(funcName, args)
@@ -790,6 +798,39 @@ func (i *Interpreter) evalDerefExpr(expr *ast.DerefExpr) *sv.SV {
 }
 
 func (i *Interpreter) evalRefExpr(expr *ast.RefExpr) *sv.SV {
+	// Для \@arr - создаём ссылку на массив
+	if arrVar, ok := expr.Value.(*ast.ArrayVar); ok {
+		arr := i.ctx.GetVar(arrVar.Name)
+		if arr == nil || arr.IsUndef() {
+			// Создаём пустой массив если не существует
+			arr = sv.NewArrayRef().Deref()
+			i.ctx.SetVar(arrVar.Name, arr)
+		}
+		return sv.NewRef(arr)
+	}
+
+	// Для \%hash - создаём ссылку на хеш
+	if hashVar, ok := expr.Value.(*ast.HashVar); ok {
+		hash := i.ctx.GetVar(hashVar.Name)
+		if hash == nil || hash.IsUndef() {
+			// Создаём пустой хеш если не существует
+			hash = sv.NewHashRef().Deref()
+			i.ctx.SetVar(hashVar.Name, hash)
+		}
+		return sv.NewRef(hash)
+	}
+
+	// Для \$scalar - создаём ссылку на скаляр
+	if scalarVar, ok := expr.Value.(*ast.ScalarVar); ok {
+		scalar := i.ctx.GetVar(scalarVar.Name)
+		if scalar == nil {
+			scalar = sv.NewUndef()
+			i.ctx.SetVar(scalarVar.Name, scalar)
+		}
+		return sv.NewRef(scalar)
+	}
+
+	// Для других выражений - обычное поведение
 	val := i.evalExpression(expr.Value)
 	return sv.NewRef(val)
 }

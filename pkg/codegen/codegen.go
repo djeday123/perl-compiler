@@ -358,6 +358,7 @@ func perl_bless(ref, class *SV) *SV {
 func perl_ref(sv *SV) *SV {
 	if sv == nil { return svStr("") }
 	if pkg, ok := _blessedPkg[sv]; ok { return svStr(pkg) }
+	if sv.flags&0x80 != 0 { return svStr("SCALAR") }
 	if sv.flags&SVf_AOK != 0 { return svStr("ARRAY") }
 	if sv.flags&SVf_HOK != 0 { return svStr("HASH") }
 	return svStr("")
@@ -512,6 +513,103 @@ func perl_isa_check(pkg, target string) *SV {
 }`)
 	g.writeln("")
 
+	// === НАЧАЛО ПАТЧА - добавить в writeRuntime() ===
+
+	// split
+	g.writeln(`func perl_split(sep, str *SV) *SV {
+	parts := strings.Split(str.AsString(), sep.AsString())
+	var result []*SV
+	for _, p := range parts {
+		result = append(result, svStr(p))
+	}
+	return svArray(result...)
+}`)
+	g.writeln("")
+
+	// reverse
+	g.writeln(`func perl_reverse(arr *SV) *SV {
+	if arr == nil || arr.flags&SVf_AOK == 0 { return svArray() }
+	n := len(arr.av)
+	result := make([]*SV, n)
+	for i := 0; i < n; i++ {
+		result[i] = arr.av[n-1-i]
+	}
+	return svArray(result...)
+}`)
+	g.writeln("")
+
+	// sort
+	g.writeln(`func perl_sort(arr *SV) *SV {
+	if arr == nil || arr.flags&SVf_AOK == 0 { return svArray() }
+	result := make([]*SV, len(arr.av))
+	copy(result, arr.av)
+	for i := 0; i < len(result)-1; i++ {
+		for j := i+1; j < len(result); j++ {
+			if result[i].AsString() > result[j].AsString() {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return svArray(result...)
+}`)
+	g.writeln("")
+
+	// values
+	g.writeln(`func perl_values(h *SV) *SV {
+	if h == nil || h.hv == nil { return svArray() }
+	var vals []*SV
+	for _, v := range h.hv { vals = append(vals, v) }
+	return svArray(vals...)
+}`)
+	g.writeln("")
+
+	// exists
+	g.writeln(`func perl_exists(v *SV) *SV {
+	if v == nil || v.flags == 0 { return svInt(0) }
+	return svInt(1)
+}`)
+	g.writeln("")
+
+	// delete (для хеша - нужно передавать хеш и ключ)
+	g.writeln(`func perl_delete(v *SV) *SV {
+	return svUndef()
+}`)
+	g.writeln("")
+
+	// chomp
+	g.writeln(`func perl_chomp(sv *SV) *SV {
+	if sv == nil { return svInt(0) }
+	s := sv.pv
+	if len(s) > 0 && s[len(s)-1] == '\n' {
+		sv.pv = s[:len(s)-1]
+		return svInt(1)
+	}
+	return svInt(0)
+}`)
+	g.writeln("")
+
+	// defined
+	g.writeln(`func perl_defined(sv *SV) *SV {
+	if sv == nil || sv.flags == 0 { return svInt(0) }
+	return svInt(1)
+}`)
+	g.writeln("")
+
+	g.writeln(`func svRef(sv *SV) *SV {
+		return &SV{av: []*SV{sv}, flags: SVf_AOK | 0x80}
+	}`)
+	g.writeln("")
+
+	g.writeln(`func svDeref(ref *SV) *SV {
+		if ref != nil && len(ref.av) > 0 {
+			return ref.av[0]
+		}
+		return svUndef()
+	}`)
+	g.writeln("")
+
+	// === КОНЕЦ ПАТЧА ===
+
 	g.writeln("// ============ End Runtime ============")
 	g.writeln("")
 }
@@ -610,37 +708,47 @@ func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
 
 	if len(decl.Names) == 1 {
 		name := g.varName(decl.Names[0])
-		g.declaredVars[name] = true
 		g.write(strings.Repeat("\t", g.indent))
+
+		// Определяем оператор: := для нового, = для уже объявленного
+		op := " := "
+		if g.declaredVars[name] {
+			op = " = "
+		} else {
+			g.declaredVars[name] = true
+		}
 
 		// Check variable type for proper initialization
 		switch decl.Names[0].(type) {
 		case *ast.ArrayVar:
 			if decl.Value != nil {
-				g.write(name + " := ")
+				g.write(name + op)
 				g.generateExpression(decl.Value)
 			} else {
-				g.write(name + " := svArray()")
+				g.write(name + op + "svArray()")
 			}
 		case *ast.HashVar:
 			if decl.Value != nil {
 				// Convert array to hash
-				g.write(name + " := func() *SV { _arr := ")
+				g.write(name + op + "func() *SV { _arr := ")
 				g.generateExpression(decl.Value)
 				g.write("; _h := svHash(); for _i := 0; _i+1 < len(_arr.av); _i += 2 { svHSet(_h, _arr.av[_i], _arr.av[_i+1]) }; return _h }()")
 			} else {
-				g.write(name + " := svHash()")
+				g.write(name + op + "svHash()")
 			}
 		default:
 			if decl.Value != nil {
-				g.write(name + " := ")
+				g.write(name + op)
 				g.generateExpression(decl.Value)
 			} else {
-				g.write(name + " := svUndef()")
+				g.write(name + op + "svUndef()")
 			}
 		}
 		g.write("\n")
-		g.writeln("_ = " + name)
+		// _ = name только для новых переменных
+		if op == " := " {
+			g.writeln("_ = " + name)
+		}
 		return
 	}
 
@@ -655,6 +763,9 @@ func (g *Generator) generateVarDecl(decl *ast.VarDecl) {
 }
 
 func (g *Generator) generateSubDecl(sub *ast.SubDecl) {
+	// Очищаем declaredVars для нового scope функции
+	g.declaredVars = make(map[string]bool)
+
 	g.write("func perl_" + strings.ReplaceAll(sub.Name, "::", "_") + "(args ...*SV) *SV {\n")
 	g.indent++
 	g.writeln("_ = args")
@@ -711,9 +822,17 @@ func (g *Generator) generateIfStmt(stmt *ast.IfStmt) {
 
 func (g *Generator) generateWhileStmt(stmt *ast.WhileStmt) {
 	g.write(strings.Repeat("\t", g.indent))
-	g.write("for (")
-	g.generateExpression(stmt.Condition)
-	g.write(").IsTrue() {\n")
+	if stmt.Until {
+		// until = пока НЕ выполняется условие
+		g.write("for !(")
+		g.generateExpression(stmt.Condition)
+		g.write(").IsTrue() {\n")
+	} else {
+		// while = пока выполняется условие
+		g.write("for (")
+		g.generateExpression(stmt.Condition)
+		g.write(").IsTrue() {\n")
+	}
 	g.indent++
 	for _, s := range stmt.Body.Statements {
 		g.generateStatement(s)
@@ -910,6 +1029,10 @@ func (g *Generator) generateExpression(expr ast.Expression) {
 		g.generateSubstExpr(e)
 	case *ast.ReadLineExpr:
 		g.generateReadLineExpr(e)
+	case *ast.RefExpr:
+		g.generateRefExpr(e)
+	case *ast.DerefExpr:
+		g.generateDerefExpr(e)
 	default:
 		g.write("svUndef()")
 	}
@@ -1162,6 +1285,25 @@ func (g *Generator) generateAssignExpr(expr *ast.AssignExpr) {
 			g.generateExpression(expr.Right)
 			g.write(")")
 		}
+	case *ast.DerefExpr:
+		// $$ref = value - присваивание через разыменование скаляра
+		if left.Sigil == "$" {
+			g.write("func() *SV { ")
+			g.write("_ref := ")
+			g.generateExpression(left.Value)
+			g.write("; ")
+			g.write("_val := ")
+			g.generateExpression(expr.Right)
+			g.write("; ")
+			g.write("if _ref != nil && len(_ref.av) > 0 { ")
+			g.write("_ref.av[0].iv = _val.iv; ")
+			g.write("_ref.av[0].nv = _val.nv; ")
+			g.write("_ref.av[0].pv = _val.pv; ")
+			g.write("_ref.av[0].flags = _val.flags; ")
+			g.write("}; return _val }()")
+			return
+		}
+		g.generateExpression(expr.Right)
 	}
 }
 
@@ -1350,6 +1492,36 @@ func (g *Generator) generateCallExpr(expr *ast.CallExpr) {
 				g.generateExpression(expr.Args[0])
 				g.write(".AsString())")
 			}
+		case "delete":
+			// delete $h{key} - нужно получить хеш и ключ
+			if len(expr.Args) >= 1 {
+				if ha, ok := expr.Args[0].(*ast.HashAccess); ok {
+					g.write("func() *SV { ")
+					// Получаем хеш
+					hashName := ""
+					if sv, ok := ha.Hash.(*ast.ScalarVar); ok {
+						hashName = g.hashName(sv.Name)
+					} else {
+						g.tempCount++
+						hashName = fmt.Sprintf("_htmp%d", g.tempCount)
+						g.write(hashName + " := ")
+						g.generateExpression(ha.Hash)
+						g.write("; ")
+					}
+					// Получаем ключ
+					g.write("_k := ")
+					g.generateExpression(ha.Key)
+					g.write(".AsString(); ")
+					// Сохраняем старое значение
+					g.write("_v := " + hashName + ".hv[_k]; ")
+					// Удаляем
+					g.write("delete(" + hashName + ".hv, _k); ")
+					// Возвращаем старое значение
+					g.write("return _v }()")
+					return
+				}
+			}
+			g.write("svUndef()")
 		default:
 			// User-defined function
 			//g.write("perl_" + name + "(")
@@ -1576,6 +1748,47 @@ func (g *Generator) generateOpenStatement(expr *ast.CallExpr) {
 		g.write("\"\"")
 	}
 	g.write(")\n")
+}
+
+func (g *Generator) generateRefExpr(expr *ast.RefExpr) {
+	// \$scalar - ссылка на скаляр
+	if sv, ok := expr.Value.(*ast.ScalarVar); ok {
+		g.write("svRef(" + g.scalarName(sv.Name) + ")")
+		return
+	}
+
+	// \@array - ссылка на массив
+	if av, ok := expr.Value.(*ast.ArrayVar); ok {
+		g.write(g.arrayName(av.Name))
+		return
+	}
+
+	// \%hash - ссылка на хеш
+	if hv, ok := expr.Value.(*ast.HashVar); ok {
+		g.write(g.hashName(hv.Name))
+		return
+	}
+
+	// Для других выражений
+	g.write("svUndef()")
+}
+
+func (g *Generator) generateDerefExpr(expr *ast.DerefExpr) {
+	switch expr.Sigil {
+	case "$":
+		// $$ref - разыменование скаляра
+		g.write("svDeref(")
+		g.generateExpression(expr.Value)
+		g.write(")")
+	case "@":
+		// @$ref - разыменование массива
+		g.generateExpression(expr.Value)
+	case "%":
+		// %$ref - разыменование хеша
+		g.generateExpression(expr.Value)
+	default:
+		g.write("svUndef()")
+	}
 }
 
 func isAlnum(c byte) bool {
