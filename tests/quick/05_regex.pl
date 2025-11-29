@@ -1,3 +1,4 @@
+		   
 # Test regex
 
 say "Testing regex...";
@@ -32,8 +33,8 @@ if ($t eq "bbb") {
 }
 
 # Complex pattern - email
-my $email = "test@example.com";
-if ($email =~ /\w+@\w+\.\w+/) {
+my $email = 'test@example.com';
+if ($email =~ /\w+\@\w+\.\w+/) {
     say "PASS: complex pattern";
 } else {
     say "FAIL: complex pattern";

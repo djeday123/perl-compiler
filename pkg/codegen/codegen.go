@@ -426,6 +426,15 @@ func perl_isa_check(pkg, target string) *SV {
 	return svInt(0)
 }`)
 	g.writeln("")
+	// Regex captures
+	g.writeln("var _captures []string")
+	g.writeln("")
+	g.writeln(`func _getCapture(n int) string {
+	if n < 1 || n > len(_captures) { return "" }
+	return _captures[n-1]
+}`)
+
+	g.writeln("")
 
 	// File I/O
 	// File I/O - добавь _filehandles ПЕРЕД perlOpen
@@ -818,6 +827,9 @@ func (g *Generator) generateExpression(expr ast.Expression) {
 			g.write("svArray(args...)")
 		} else if e.Name == "$_" {
 			g.write("v__") // default variable
+		} else if len(e.Name) >= 2 && e.Name[0] == '$' && e.Name[1] >= '1' && e.Name[1] <= '9' {
+			// Capture group $1, $2, ..., $99, etc.
+			g.write(fmt.Sprintf("svStr(_getCapture(%s))", e.Name[1:]))
 		} else {
 			g.write("svUndef()")
 		}
@@ -1405,7 +1417,12 @@ func (g *Generator) generateInterpolatedString(s string) {
 				}
 				varName := s[i+1 : j]
 				if varName != "" {
-					g.write("_s += " + g.scalarName(varName) + ".AsString(); ")
+					// Check if it's a capture group $1, $2, etc.
+					if len(varName) > 0 && varName[0] >= '1' && varName[0] <= '9' {
+						g.write("_s += _getCapture(" + varName + "); ")
+					} else {
+						g.write("_s += " + g.scalarName(varName) + ".AsString(); ")
+					}
 				}
 				i = j
 			}
@@ -1434,13 +1451,13 @@ func (g *Generator) generateMatchExpr(expr *ast.MatchExpr) {
 	}
 
 	if expr.Negate {
-		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); if re.MatchString(")
+		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); _m := re.FindStringSubmatch(")
 		g.generateExpression(expr.Target)
-		g.write(".AsString()) { return svInt(0) }; return svInt(1) }()")
+		g.write(".AsString()); if _m != nil { _captures = _m[1:]; return svInt(0) }; return svInt(1) }()")
 	} else {
-		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); if re.MatchString(")
+		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); _m := re.FindStringSubmatch(")
 		g.generateExpression(expr.Target)
-		g.write(".AsString()) { return svInt(1) }; return svInt(0) }()")
+		g.write(".AsString()); if _m != nil { _captures = _m[1:]; return svInt(1) }; return svInt(0) }()")
 	}
 }
 
@@ -1485,18 +1502,27 @@ func (g *Generator) generateSubstExpr(expr *ast.SubstExpr) {
 	}
 
 	if strings.Contains(flags, "g") {
-		// Global replace
+		// Global replace with capture support
 		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); ")
 		g.write("_old := " + varName + ".AsString(); ")
-		g.write("_new := re.ReplaceAllString(_old, `" + replacement + "`); ")
+		g.write("_new := re.ReplaceAllStringFunc(_old, func(_match string) string { ")
+		g.write("_m := re.FindStringSubmatch(_match); _captures = _m[1:]; ")
+		g.write("_r := `" + replacement + "`; ")
+		// Replace $1, $2 etc in replacement
+		g.write("for _i := len(_captures); _i >= 1; _i-- { _r = strings.ReplaceAll(_r, fmt.Sprintf(\"$%d\", _i), _getCapture(_i)) }; ")
+		g.write("return _r }); ")
 		g.write(varName + " = svStr(_new); ")
 		g.write("if _old != _new { return svInt(1) }; return svInt(0) }()")
 	} else {
-		// Single replace
+		// Single replace with capture support
 		g.write("func() *SV { re := regexp.MustCompile(`" + rePattern + "`); ")
 		g.write("_old := " + varName + ".AsString(); ")
+		g.write("_m := re.FindStringSubmatch(_old); ")
+		g.write("if _m != nil { _captures = _m[1:]; ")
 		g.write("_loc := re.FindStringIndex(_old); ")
-		g.write("if _loc != nil { " + varName + " = svStr(_old[:_loc[0]] + `" + replacement + "` + _old[_loc[1]:]); return svInt(1) }; ")
+		g.write("_r := `" + replacement + "`; ")
+		g.write("for _i := len(_captures); _i >= 1; _i-- { _r = strings.ReplaceAll(_r, fmt.Sprintf(\"$%d\", _i), _getCapture(_i)) }; ")
+		g.write(varName + " = svStr(_old[:_loc[0]] + _r + _old[_loc[1]:]); return svInt(1) }; ")
 		g.write("return svInt(0) }()")
 	}
 }

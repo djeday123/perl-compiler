@@ -368,3 +368,8 @@ func (c *Context) ReadLine(name string) (string, bool) {
 func (c *Context) GetFileHandle(name string) *FileHandle {
 	return c.filehandles[name]
 }
+
+// SetMatchVars sets regex match result variables via runtime.
+func (c *Context) SetMatchVars(match, preMath, postMatch string, captures []string) {
+	c.runtime.SetMatchVars(match, preMath, postMatch, captures)
+}

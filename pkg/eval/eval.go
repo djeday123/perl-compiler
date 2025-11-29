@@ -2,6 +2,7 @@
 package eval
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"regexp"
@@ -952,7 +953,24 @@ func (i *Interpreter) evalMatchExpr(expr *ast.MatchExpr) *sv.SV {
 		return sv.NewInt(0)
 	}
 
-	matched := re.MatchString(str)
+	loc := re.FindStringSubmatchIndex(str)
+	matched := loc != nil
+
+	// Set match variables
+	if matched {
+		matches := re.FindStringSubmatch(str)
+		preMath := str[:loc[0]]
+		postMatch := str[loc[1]:]
+		fullMatch := matches[0]
+
+		// Extract capture groups (skip index 0 which is the full match)
+		captures := []string{}
+		if len(matches) > 1 {
+			captures = matches[1:]
+		}
+
+		i.ctx.SetMatchVars(fullMatch, preMath, postMatch, captures)
+	}
 
 	if expr.Negate {
 		if matched {
@@ -987,17 +1005,28 @@ func (i *Interpreter) evalSubstExpr(expr *ast.SubstExpr) *sv.SV {
 	}
 
 	var result string
+	changed := false
+
 	if strings.Contains(flags, "g") {
-		result = re.ReplaceAllString(str, replacement)
+		// Global replacement with capture group support
+		result = re.ReplaceAllStringFunc(str, func(match string) string {
+			// Get submatch for this specific match
+			submatches := re.FindStringSubmatch(match)
+			return i.interpolateReplacement(replacement, submatches)
+		})
+		changed = result != str
 	} else {
-		// result = re.ReplaceAllStringFunc(str, func(match string) string {
-		// 	// Only replace first occurrence
-		// 	return replacement
-		// })
-		// Actually simpler:
-		loc := re.FindStringIndex(str)
+		// Single replacement
+		loc := re.FindStringSubmatchIndex(str)
 		if loc != nil {
-			result = str[:loc[0]] + replacement + str[loc[1]:]
+			matches := re.FindStringSubmatch(str)
+			// Set match vars for potential use
+			if len(matches) > 1 {
+				i.ctx.SetMatchVars(matches[0], str[:loc[0]], str[loc[1]:], matches[1:])
+			}
+			interpolated := i.interpolateReplacement(replacement, matches)
+			result = str[:loc[0]] + interpolated + str[loc[1]:]
+			changed = true
 		} else {
 			result = str
 		}
@@ -1008,10 +1037,27 @@ func (i *Interpreter) evalSubstExpr(expr *ast.SubstExpr) *sv.SV {
 		i.ctx.SetVar(v.Name, sv.NewString(result))
 	}
 
-	if result != str {
+	if changed {
 		return sv.NewInt(1)
 	}
 	return sv.NewInt(0)
+}
+
+// interpolateReplacement replaces $1, $2, etc. in replacement string with captured groups
+func (i *Interpreter) interpolateReplacement(replacement string, matches []string) string {
+	result := replacement
+	// Replace $1, $2, ... $9 with captured groups
+	for n := 9; n >= 1; n-- {
+		placeholder := fmt.Sprintf("$%d", n)
+		if strings.Contains(result, placeholder) {
+			value := ""
+			if n < len(matches) {
+				value = matches[n]
+			}
+			result = strings.ReplaceAll(result, placeholder, value)
+		}
+	}
+	return result
 }
 
 func (i *Interpreter) evalReadLineExpr(expr *ast.ReadLineExpr) *sv.SV {
