@@ -4,6 +4,7 @@ package xs2go
 import (
 	"fmt"
 	"os"
+	"perlc/pkg/c2go"
 	"regexp"
 	"strings"
 )
@@ -63,13 +64,20 @@ func (t *Translator) Translate(xsFile string) (string, error) {
 func (t *Translator) parseXS() error {
 	content := t.input
 
-	// Удаляем C комментарии
-	commentRe := regexp.MustCompile(`/\*.*?\*/`)
+	// Удаляем C комментарии /* ... */
+	commentRe := regexp.MustCompile(`(?s)/\*.*?\*/`)
 	content = commentRe.ReplaceAllString(content, "")
 
-	// Удаляем #include и другие директивы препроцессора
-	preprocessorRe := regexp.MustCompile(`(?m)^#.*$`)
+	// Удаляем #include, #define и другие директивы
+	preprocessorRe := regexp.MustCompile(`(?m)^#\s*(include|define|ifdef|ifndef|endif|else|elif|if|undef).*$`)
 	content = preprocessorRe.ReplaceAllString(content, "")
+
+	// Удаляем typedef и struct
+	typedefRe := regexp.MustCompile(`(?s)typedef\s+(?:struct|enum)?\s*\{[^}]*\}[^;]*;`)
+	content = typedefRe.ReplaceAllString(content, "")
+
+	structRe := regexp.MustCompile(`(?s)struct\s+\w+\s*\{[^}]*\}\s*;`)
+	content = structRe.ReplaceAllString(content, "")
 
 	// Парсим MODULE = ... PACKAGE = ...
 	moduleRe := regexp.MustCompile(`MODULE\s*=\s*(\S+)\s+PACKAGE\s*=\s*(\S+)`)
@@ -78,85 +86,582 @@ func (t *Translator) parseXS() error {
 		t.package_ = matches[2]
 	}
 
-	// Ищем функции
-	blocks := regexp.MustCompile(`(?s)(\w+(?:\s*\*)?)\s*\n(\w+)\s*\(([^)]*)\)(.*?)OUTPUT:\s*\n\s*(\w+)`).
-		FindAllStringSubmatch(content, -1)
+	// Находим начало XS секции (после MODULE =)
+	moduleIdx := strings.Index(content, "MODULE =")
+	if moduleIdx == -1 {
+		return nil
+	}
+	xsContent := content[moduleIdx:]
 
-	for _, block := range blocks {
-		if len(block) >= 6 {
-			fn := &XSFunction{
-				ReturnType: strings.TrimSpace(block[1]),
-				Name:       strings.TrimSpace(block[2]),
-				OutputVar:  strings.TrimSpace(block[5]),
-			}
+	// Ищем функции в двух форматах:
+	// Формат 1: тип и имя на одной строке - "int add(a, b)"
+	// Формат 2: тип на отдельной строке - "SV *\nhello(name)"
 
-			// Аргументы из сигнатуры (имена)
-			argsStr := strings.TrimSpace(block[3])
-			argNames := []string{}
-			if argsStr != "" {
-				for _, arg := range strings.Split(argsStr, ",") {
-					argNames = append(argNames, strings.TrimSpace(arg))
-				}
-			}
+	// Формат 2: тип на отдельной строке (XS стиль)
+	funcRe2 := regexp.MustCompile(`(?m)^(\w+\s*\*?)\s*\n(\w+)\s*\(([^)]*)\)`)
+	matches2 := funcRe2.FindAllStringSubmatchIndex(xsContent, -1)
 
-			// Парсим тело (между сигнатурой и OUTPUT)
-			body := block[4]
+	for i, match := range matches2 {
+		if len(match) < 8 {
+			continue
+		}
 
-			// Разделяем на часть до CODE: и после
-			codeParts := regexp.MustCompile(`(?s)(.*)CODE:\s*(.*)`).FindStringSubmatch(body)
+		returnType := strings.TrimSpace(xsContent[match[2]:match[3]])
+		funcName := strings.TrimSpace(xsContent[match[4]:match[5]])
+		argsStr := strings.TrimSpace(xsContent[match[6]:match[7]])
 
-			argDeclarations := ""
-			codeBody := ""
+		funcStart := match[0]
+		funcEnd := len(xsContent)
+		if i+1 < len(matches2) {
+			funcEnd = matches2[i+1][0]
+		}
 
-			if len(codeParts) >= 3 {
-				argDeclarations = codeParts[1]
-				codeBody = codeParts[2]
-			}
+		funcBody := xsContent[funcStart:funcEnd]
 
-			fn.Code = strings.TrimSpace(codeBody)
+		fn := t.parseXSFunction(returnType, funcName, argsStr, funcBody)
+		if fn != nil && fn.Name != "" {
+			t.functions[fn.Name] = fn
+		}
+	}
 
-			// Парсим декларации аргументов (только часть ДО CODE:)
-			lines := strings.Split(argDeclarations, "\n")
-			for i, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
+	// Формат 1: тип и имя на одной строке (fallback)
+	funcRe1 := regexp.MustCompile(`(?m)^(\w+)\s+(\w+)\s*\(([^)]*)\)`)
+	matches1 := funcRe1.FindAllStringSubmatchIndex(xsContent, -1)
 
-				// Формат: "SV *name" или "int a"
-				parts := strings.Fields(line)
-				if len(parts) >= 2 {
-					typeName := strings.Join(parts[:len(parts)-1], " ")
-					varName := parts[len(parts)-1]
-					varName = strings.TrimPrefix(varName, "*")
-					fn.Args = append(fn.Args, XSArg{
-						Type: typeName,
-						Name: varName,
-					})
-				} else if len(parts) == 1 && i < len(argNames) {
-					// Только тип, имя берём из сигнатуры
-					fn.Args = append(fn.Args, XSArg{
-						Type: parts[0],
-						Name: argNames[i],
-					})
-				}
-			}
+	for i, match := range matches1 {
+		if len(match) < 8 {
+			continue
+		}
 
-			// Если аргументы не найдены в теле, используем имена из сигнатуры
-			if len(fn.Args) == 0 && len(argNames) > 0 {
-				for _, name := range argNames {
-					fn.Args = append(fn.Args, XSArg{
-						Type: "SV *",
-						Name: name,
-					})
-				}
-			}
+		returnType := xsContent[match[2]:match[3]]
+		funcName := xsContent[match[4]:match[5]]
+		argsStr := xsContent[match[6]:match[7]]
 
+		// Пропускаем если уже нашли эту функцию
+		if _, exists := t.functions[funcName]; exists {
+			continue
+		}
+
+		funcStart := match[0]
+		funcEnd := len(xsContent)
+		if i+1 < len(matches1) {
+			funcEnd = matches1[i+1][0]
+		}
+
+		funcBody := xsContent[funcStart:funcEnd]
+
+		fn := t.parseXSFunction(returnType, funcName, argsStr, funcBody)
+		if fn != nil && fn.Name != "" {
 			t.functions[fn.Name] = fn
 		}
 	}
 
 	return nil
+}
+
+func (t *Translator) parseXSFunction(returnType, funcName, argsStr, body string) *XSFunction {
+	// Пропускаем служебные функции
+	if t.isSkippable(funcName, "") {
+		return nil
+	}
+
+	// Пропускаем если это не XS функция (нет PPCODE: или CODE:)
+	hasPPCode := strings.Contains(body, "PPCODE:")
+	hasCode := strings.Contains(body, "CODE:")
+
+	if !hasPPCode && !hasCode {
+		return nil
+	}
+
+	fn := &XSFunction{
+		ReturnType: strings.TrimSpace(returnType),
+		Name:       strings.TrimSpace(funcName),
+	}
+
+	// Получаем имена аргументов из сигнатуры
+	argNames := []string{}
+	if argsStr != "" {
+		for _, arg := range strings.Split(argsStr, ",") {
+			arg = strings.TrimSpace(arg)
+			if arg != "" {
+				argNames = append(argNames, arg)
+			}
+		}
+	}
+
+	if hasPPCode {
+		// Извлекаем код после PPCODE:
+		idx := strings.Index(body, "PPCODE:")
+		if idx != -1 {
+			// Парсим типы аргументов из части до PPCODE:
+			beforeCode := body[:idx]
+			fn.Args = t.parseArgTypes(beforeCode, argNames)
+
+			code := body[idx+len("PPCODE:"):]
+			fn.Code = t.cleanPPCode(code)
+		}
+	} else if hasCode {
+		codeIdx := strings.Index(body, "CODE:")
+		outputIdx := strings.Index(body, "OUTPUT:")
+
+		if codeIdx != -1 {
+			// Парсим типы аргументов из части до CODE:
+			beforeCode := body[:codeIdx]
+			fn.Args = t.parseArgTypes(beforeCode, argNames)
+
+			codeStart := codeIdx + len("CODE:")
+			codeEnd := len(body)
+			if outputIdx != -1 && outputIdx > codeIdx {
+				codeEnd = outputIdx
+			}
+			fn.Code = strings.TrimSpace(body[codeStart:codeEnd])
+		}
+
+		// Извлекаем OUTPUT переменную
+		if outputIdx != -1 {
+			outputSection := body[outputIdx+len("OUTPUT:"):]
+			lines := strings.Split(outputSection, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line != "" && !strings.Contains(line, ":") {
+					fn.OutputVar = line
+					break
+				}
+			}
+		}
+	}
+
+	// Если типы не найдены, используем SV* по умолчанию
+	if len(fn.Args) == 0 && len(argNames) > 0 {
+		for _, name := range argNames {
+			fn.Args = append(fn.Args, XSArg{
+				Type: "SV *",
+				Name: name,
+			})
+		}
+	}
+
+	return fn
+}
+
+// parseArgTypes парсит типы аргументов из секции между сигнатурой и CODE:
+func (t *Translator) parseArgTypes(section string, argNames []string) []XSArg {
+	var args []XSArg
+
+	lines := strings.Split(section, "\n")
+
+	// Создаём map для быстрого поиска
+	argSet := make(map[string]bool)
+	for _, name := range argNames {
+		argSet[name] = true
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Пропускаем если это сигнатура функции
+		if strings.Contains(line, "(") && strings.Contains(line, ")") {
+			continue
+		}
+
+		// Формат: "int a" или "SV *name" или "char *str"
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			varName := parts[len(parts)-1]
+			varName = strings.TrimPrefix(varName, "*")
+
+			// Проверяем что это один из наших аргументов
+			if argSet[varName] {
+				typeName := strings.Join(parts[:len(parts)-1], " ")
+				if strings.HasPrefix(parts[len(parts)-1], "*") {
+					typeName += " *"
+				}
+				args = append(args, XSArg{
+					Type: typeName,
+					Name: varName,
+				})
+			}
+		}
+	}
+
+	// Сохраняем порядок аргументов как в сигнатуре
+	orderedArgs := make([]XSArg, 0, len(argNames))
+	argMap := make(map[string]XSArg)
+	for _, arg := range args {
+		argMap[arg.Name] = arg
+	}
+
+	for _, name := range argNames {
+		if arg, ok := argMap[name]; ok {
+			orderedArgs = append(orderedArgs, arg)
+		} else {
+			// Тип не найден - используем SV* по умолчанию
+			orderedArgs = append(orderedArgs, XSArg{
+				Type: "SV *",
+				Name: name,
+			})
+		}
+	}
+
+	return orderedArgs
+}
+
+func (t *Translator) parseXSArgs(argsStr string) []XSArg {
+	var args []XSArg
+
+	if argsStr == "" {
+		return args
+	}
+
+	parts := strings.Split(argsStr, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// Убираем значение по умолчанию: "int enable = 1" -> "int enable"
+		if idx := strings.Index(part, "="); idx != -1 {
+			part = strings.TrimSpace(part[:idx])
+		}
+
+		tokens := strings.Fields(part)
+		if len(tokens) >= 2 {
+			varName := tokens[len(tokens)-1]
+			varName = strings.TrimPrefix(varName, "*")
+			typeName := strings.Join(tokens[:len(tokens)-1], " ")
+
+			// Если * было в имени, добавляем к типу
+			if strings.HasPrefix(tokens[len(tokens)-1], "*") {
+				typeName += " *"
+			}
+
+			args = append(args, XSArg{
+				Type: typeName,
+				Name: varName,
+			})
+		} else if len(tokens) == 1 {
+			// Только имя без типа - предполагаем SV*
+			args = append(args, XSArg{
+				Type: "SV *",
+				Name: tokens[0],
+			})
+		}
+	}
+
+	return args
+}
+
+func (t *Translator) cleanPPCode(code string) string {
+	lines := strings.Split(code, "\n")
+	var cleaned []string
+
+	inAlias := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Пропускаем пустые строки в начале
+		if len(cleaned) == 0 && trimmed == "" {
+			continue
+		}
+
+		// Пропускаем ALIAS: секции
+		if strings.HasPrefix(trimmed, "ALIAS:") {
+			inAlias = true
+			continue
+		}
+		if inAlias {
+			// ALIAS строки имеют формат "name = VALUE"
+			if regexp.MustCompile(`^\w+\s*=\s*\w+$`).MatchString(trimmed) {
+				continue
+			}
+			inAlias = false
+		}
+
+		// Пропускаем ATTRS:
+		if strings.HasPrefix(trimmed, "ATTRS:") {
+			continue
+		}
+
+		// Останавливаемся на следующей функции
+		if regexp.MustCompile(`^\w+\s+\w+\s*\(`).MatchString(trimmed) {
+			break
+		}
+
+		cleaned = append(cleaned, trimmed)
+	}
+
+	return strings.Join(cleaned, "\n")
+}
+
+func (t *Translator) parsePPCodeFunction(match []string) *XSFunction {
+	returnType := strings.TrimSpace(match[1])
+	funcName := strings.TrimSpace(match[2])
+	argsStr := strings.TrimSpace(match[3])
+	body := match[4]
+
+	// Пропускаем служебные функции
+	if t.isSkippable(funcName, "") {
+		return nil
+	}
+
+	fn := &XSFunction{
+		ReturnType: returnType,
+		Name:       funcName,
+		OutputVar:  "", // PPCODE не использует RETVAL
+	}
+
+	// Парсим аргументы
+	fn.Args = t.parseXSArgs(argsStr)
+
+	// Очищаем код
+	fn.Code = t.cleanPPCode(body)
+
+	return fn
+}
+
+func (t *Translator) parseCodeFunction(match []string) *XSFunction {
+	returnType := strings.TrimSpace(match[1])
+	funcName := strings.TrimSpace(match[2])
+	argsStr := strings.TrimSpace(match[3])
+	body := match[4]
+	outputVar := strings.TrimSpace(match[5])
+
+	if t.isSkippable(funcName, "") {
+		return nil
+	}
+
+	fn := &XSFunction{
+		ReturnType: returnType,
+		Name:       funcName,
+		OutputVar:  outputVar,
+	}
+
+	fn.Args = t.parseXSArgs(argsStr)
+	fn.Code = strings.TrimSpace(body)
+
+	return fn
+}
+
+func (t *Translator) extractFunctions(section string) {
+	// Ищем XS функции
+	// Формат:
+	// ReturnType
+	// func_name(args)
+	//     type arg1
+	//     type arg2
+	//     CODE:
+	//         ...
+	//     OUTPUT:
+	//         RETVAL
+
+	// Паттерн для XS функции
+	// Ключевой признак: CODE: и OUTPUT: секции
+	funcPattern := regexp.MustCompile(`(?sm)^(\w+(?:\s*\*)?)\s*$\s*^(\w+)\s*\(([^)]*)\)\s*$(.*?)^[ \t]+OUTPUT:\s*$\s*^[ \t]+(\w+)`)
+
+	matches := funcPattern.FindAllStringSubmatch(section, -1)
+
+	for _, match := range matches {
+		if len(match) < 6 {
+			continue
+		}
+
+		returnType := strings.TrimSpace(match[1])
+		funcName := strings.TrimSpace(match[2])
+		argsStr := strings.TrimSpace(match[3])
+		body := match[4]
+		outputVar := strings.TrimSpace(match[5])
+
+		// Пропускаем если это не похоже на XS функцию
+		if t.isSkippable(funcName, returnType) {
+			continue
+		}
+
+		fn := &XSFunction{
+			ReturnType: returnType,
+			Name:       funcName,
+			OutputVar:  outputVar,
+		}
+
+		// Парсим имена аргументов из сигнатуры
+		argNames := []string{}
+		if argsStr != "" {
+			for _, arg := range strings.Split(argsStr, ",") {
+				arg = strings.TrimSpace(arg)
+				if arg != "" {
+					argNames = append(argNames, arg)
+				}
+			}
+		}
+
+		// Разделяем тело на декларации аргументов и CODE
+		t.parseBody(fn, body, argNames)
+
+		// Добавляем функцию только если она валидна
+		if fn.Name != "" && (len(fn.Args) > 0 || len(argNames) == 0) {
+			t.functions[fn.Name] = fn
+		}
+	}
+}
+
+func (t *Translator) isSkippable(funcName, returnType string) bool {
+	_ = returnType
+	// Пропускаем внутренние функции
+	skipNames := map[string]bool{
+		"DESTROY":   true,
+		"CLONE":     true,
+		"AUTOLOAD":  true,
+		"BEGIN":     true,
+		"END":       true,
+		"UNITCHECK": true,
+		"CHECK":     true,
+		"INIT":      true,
+	}
+
+	if skipNames[funcName] {
+		return true
+	}
+
+	// Пропускаем если имя начинается с _
+	if strings.HasPrefix(funcName, "_") {
+		return true
+	}
+
+	return false
+}
+
+func (t *Translator) parseBody(fn *XSFunction, body string, argNames []string) {
+	// Разделяем на часть до CODE: и после
+	codeParts := regexp.MustCompile(`(?si)(.*?)CODE:\s*(.*)`).FindStringSubmatch(body)
+
+	argDeclarations := ""
+	codeBody := ""
+
+	if len(codeParts) >= 3 {
+		argDeclarations = codeParts[1]
+		codeBody = codeParts[2]
+	} else {
+		// Нет CODE: секции
+		return
+	}
+
+	// Парсим декларации аргументов
+	fn.Args = t.parseArgDeclarations(argDeclarations, argNames)
+
+	// Если аргументы не найдены, используем имена из сигнатуры с типом по умолчанию
+	if len(fn.Args) == 0 && len(argNames) > 0 {
+		for _, name := range argNames {
+			fn.Args = append(fn.Args, XSArg{
+				Type: "SV *",
+				Name: name,
+			})
+		}
+	}
+
+	// Очищаем код от лишнего
+	fn.Code = t.cleanCode(codeBody)
+}
+
+func (t *Translator) parseArgDeclarations(declarations string, argNames []string) []XSArg {
+	_ = argNames
+	var args []XSArg
+
+	lines := strings.Split(declarations, "\n")
+	argIndex := 0
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Пропускаем PREINIT:, INIT:, ALIAS: и т.д.
+		if strings.HasSuffix(line, ":") {
+			continue
+		}
+
+		// Пропускаем если это не декларация типа
+		if !t.isTypeDeclaration(line) {
+			continue
+		}
+
+		// Формат: "SV *name" или "int a" или "char *str"
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			// Последнее слово - имя переменной
+			varName := parts[len(parts)-1]
+			// Всё остальное - тип
+			typeName := strings.Join(parts[:len(parts)-1], " ")
+
+			// Убираем * из имени если прилипло
+			varName = strings.TrimPrefix(varName, "*")
+			// Добавляем * к типу если было в имени
+			if strings.HasPrefix(parts[len(parts)-1], "*") {
+				typeName += " *"
+			}
+
+			args = append(args, XSArg{
+				Type: typeName,
+				Name: varName,
+			})
+			argIndex++
+		}
+	}
+
+	return args
+}
+
+func (t *Translator) isTypeDeclaration(line string) bool {
+	// Проверяем, похоже ли на декларацию типа
+	validTypes := []string{
+		"SV", "AV", "HV", "CV", "GV",
+		"int", "long", "short", "char",
+		"unsigned", "signed",
+		"double", "float",
+		"I32", "I16", "I8",
+		"U32", "U16", "U8",
+		"IV", "UV", "NV",
+		"STRLEN", "Size_t", "bool",
+	}
+
+	for _, vt := range validTypes {
+		if strings.HasPrefix(line, vt+" ") || strings.HasPrefix(line, vt+"*") || strings.HasPrefix(line, vt+"\t") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (t *Translator) cleanCode(code string) string {
+	lines := strings.Split(code, "\n")
+	var cleaned []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Пропускаем пустые строки
+		if trimmed == "" {
+			continue
+		}
+
+		// Останавливаемся на OUTPUT: (если вдруг попало)
+		if strings.HasPrefix(trimmed, "OUTPUT:") {
+			break
+		}
+
+		// Пропускаем метки
+		if strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, "=") {
+			continue
+		}
+
+		cleaned = append(cleaned, trimmed)
+	}
+
+	return strings.Join(cleaned, "\n")
 }
 
 func (t *Translator) parseArgs(argsStr string) []XSArg {
@@ -283,57 +788,10 @@ func (t *Translator) extractArg(index int, cType, goType string) string {
 	}
 }
 
+// Замени метод translateCCode на:
 func (t *Translator) translateCCode(cCode string) string {
-	code := cCode
-
-	lines := strings.Split(code, "\n")
-	var result []string
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// char *str = SvPV_nolen(name); -> str := name.AsString()
-		if matches := regexp.MustCompile(`char\s*\*\s*(\w+)\s*=\s*SvPV_nolen\s*\(\s*(\w+)\s*\)\s*;?`).FindStringSubmatch(line); len(matches) >= 3 {
-			line = fmt.Sprintf("%s := %s.AsString()", matches[1], matches[2])
-			result = append(result, line)
-			continue
-		}
-
-		// char *str = SvPV(name, len); -> str := name.AsString()
-		if matches := regexp.MustCompile(`char\s*\*\s*(\w+)\s*=\s*SvPV\s*\(\s*(\w+)\s*,\s*\w+\s*\)\s*;?`).FindStringSubmatch(line); len(matches) >= 3 {
-			line = fmt.Sprintf("%s := %s.AsString()", matches[1], matches[2])
-			result = append(result, line)
-			continue
-		}
-
-		// newSVpvf("...", args) -> svStr(fmt.Sprintf("...", args))
-		line = regexp.MustCompile(`newSVpvf\s*\(\s*"([^"]+)",\s*([^)]+)\)`).ReplaceAllString(line, `svStr(fmt.Sprintf("$1", $2))`)
-
-		// newSVpv(str, 0) -> svStr(str)
-		line = regexp.MustCompile(`newSVpv\s*\(\s*([^,]+),\s*\d+\s*\)`).ReplaceAllString(line, "svStr($1)")
-
-		// newSViv(x) -> svInt(x)
-		line = regexp.MustCompile(`newSViv\s*\(\s*([^)]+)\s*\)`).ReplaceAllString(line, "svInt(int64($1))")
-
-		// RETVAL = a + b; -> RETVAL = svInt(int64(a + b))
-		if strings.HasPrefix(line, "RETVAL = ") && !strings.Contains(line, "svStr") && !strings.Contains(line, "svInt") && !strings.Contains(line, "svFloat") {
-			expr := strings.TrimPrefix(line, "RETVAL = ")
-			expr = strings.TrimSuffix(expr, ";")
-			if !strings.Contains(expr, "\"") {
-				line = fmt.Sprintf("RETVAL = svInt(int64(%s))", expr)
-			}
-		}
-
-		// Убираем лишние точки с запятой
-		line = strings.TrimSuffix(line, ";")
-
-		result = append(result, line)
-	}
-
-	return strings.Join(result, "\n")
+	c2goTranslator := c2go.New()
+	return c2goTranslator.Translate(cCode)
 }
 
 func (t *Translator) generateInit() {
