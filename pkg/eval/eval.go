@@ -31,7 +31,7 @@ func New() *Interpreter {
 	}
 }
 
-var interpolateRe = regexp.MustCompile(`\$(\w+)|\$\{(\w+)\}|@(\w+)`)
+var interpolateRe = regexp.MustCompile(`\$(\w+)\[([^\]]+)\]|\$(\w+)\{([^}]+)\}|\$\{(\w+)\}|\$(\w+)|@(\w+)`)
 
 // SetStdout sets the output writer.
 func (i *Interpreter) SetStdout(w io.Writer) {
@@ -685,8 +685,53 @@ func (i *Interpreter) evalCallExpr(expr *ast.CallExpr) *sv.SV {
 		return i.builtinExists(expr)
 	case "delete":
 		return i.builtinDelete(expr)
+	case "index":
+		return i.builtinIndex(args)
+	case "rindex":
+		return i.builtinRindex(args)
+	case "lcfirst":
+		return i.builtinLcfirst(args)
+	case "ucfirst":
+		return i.builtinUcfirst(args)
+	case "chop":
+		return i.builtinChop(expr.Args)
+	case "sprintf":
+		return i.builtinSprintf(args)
+	case "quotemeta":
+		return i.builtinQuotemeta(args)
+	case "hex":
+		return i.builtinHex(args)
+	case "oct":
+		return i.builtinOct(args)
+	case "fc":
+		return i.builtinFc(args)
+	case "pack":
+		return i.builtinPack(args)
+	case "unpack":
+		return i.builtinUnpack(args)
+	case "grep":
+		return i.builtinGrep(expr)
+	case "map":
+		return i.builtinMap(expr)
+	case "wantarray":
+		return i.builtinWantarray(args)
+	case "each":
+		return i.builtinEach(args)
+	case "pos":
+		return i.builtinPos(args)
+	case "printf":
+		return i.builtinPrintf(args)
+	case "eof":
+		return i.builtinEof(expr)
+	case "tell":
+		return i.builtinTell(expr)
+	case "seek":
+		return i.builtinSeek(expr)
+	case "binmode":
+		return i.builtinBinmode(expr)
+	case "read":
+		return i.builtinRead(expr, args)
 	}
-
 	return i.callUserSub(funcName, args)
 }
 
@@ -846,6 +891,12 @@ func (i *Interpreter) evalSpecialVar(name string) *sv.SV {
 	if name == "@_" {
 		return i.ctx.GetArgs()
 	}
+	if name == "_" || name == "$_" {
+		// $_ хранится как обычная переменная
+		if v := i.ctx.GetVar("_"); v != nil {
+			return v
+		}
+	}
 	return i.ctx.GetSpecialVar(name)
 }
 
@@ -905,11 +956,74 @@ func (i *Interpreter) svToList(val *sv.SV) []*sv.SV {
 	return []*sv.SV{val}
 }
 
+// Заменить функцию interpolateString на:
 func (i *Interpreter) interpolateString(s string) string {
 	return interpolateRe.ReplaceAllStringFunc(s, func(match string) string {
-		var name string
+		// $arr[idx] - элемент массива
+		if strings.HasPrefix(match, "$") && strings.Contains(match, "[") {
+			// Извлекаем имя и индекс
+			bracketIdx := strings.Index(match, "[")
+			name := match[1:bracketIdx]
+			idxStr := match[bracketIdx+1 : len(match)-1]
+
+			// Получаем массив
+			val := i.ctx.GetVar(name)
+			if val == nil {
+				return ""
+			}
+
+			// Парсим индекс
+			var idx int64
+			fmt.Sscanf(idxStr, "%d", &idx)
+
+			// Получаем элемент
+			var target *sv.SV
+			if val.IsRef() {
+				target = val.Deref()
+			} else {
+				target = val
+			}
+			if target != nil && target.IsArray() {
+				elements := target.ArrayData()
+				if idx < 0 {
+					idx = int64(len(elements)) + idx
+				}
+				if idx >= 0 && idx < int64(len(elements)) {
+					return elements[idx].AsString()
+				}
+			}
+			return ""
+		}
+
+		// $hash{key} - элемент хеша
+		if strings.HasPrefix(match, "$") && strings.Contains(match, "{") && !strings.HasPrefix(match, "${") {
+			braceIdx := strings.Index(match, "{")
+			name := match[1:braceIdx]
+			key := match[braceIdx+1 : len(match)-1]
+
+			// Получаем хеш
+			val := i.ctx.GetVar(name)
+			if val == nil {
+				return ""
+			}
+
+			var target *sv.SV
+			if val.IsRef() {
+				target = val.Deref()
+			} else {
+				target = val
+			}
+			if target != nil && target.IsHash() {
+				if elem := target.HashData()[key]; elem != nil {
+					return elem.AsString()
+				}
+			}
+			return ""
+		}
+
+		// @array - весь массив
 		if match[0] == '@' {
-			name = match[1:]
+			name := match[1:]
 			val := i.ctx.GetVar(name)
 			if val != nil && val.IsArray() {
 				elements := val.ArrayData()
@@ -921,11 +1035,19 @@ func (i *Interpreter) interpolateString(s string) string {
 			}
 			return ""
 		}
+
+		// ${var} - переменная в фигурных скобках
 		if strings.HasPrefix(match, "${") {
-			name = match[2 : len(match)-1]
-		} else {
-			name = match[1:]
+			name := match[2 : len(match)-1]
+			val := i.ctx.GetVar(name)
+			if val != nil {
+				return val.AsString()
+			}
+			return ""
 		}
+
+		// $var - простая переменная
+		name := match[1:]
 		val := i.ctx.GetVar(name)
 		if val != nil {
 			return val.AsString()

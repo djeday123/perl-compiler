@@ -158,6 +158,11 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerPrefix(lexer.TokIncr, p.parsePrefixExpression)
 	p.registerPrefix(lexer.TokDecr, p.parsePrefixExpression)
 
+	p.registerPrefix(lexer.TokWantarray, p.parseBuiltinCall)
+	p.registerPrefix(lexer.TokGrep, p.parseGrepMap)
+	p.registerPrefix(lexer.TokMap, p.parseGrepMap)
+	p.registerPrefix(lexer.TokRead, p.parseBuiltinCall)
+
 	// Register infix parsers
 	// Ara ek ayrıştırıcıları kaydet
 	p.registerInfix(lexer.TokPlus, p.parseInfixExpression)
@@ -223,9 +228,6 @@ func New(l *lexer.Lexer) *Parser {
 
 	p.registerInfix(lexer.TokFatArrow, p.parseFatArrowExpression)
 	p.registerPrefix(lexer.TokBless, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokShift, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokPop, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokPush, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokPrint, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokSay, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokDie, p.parseBuiltinCall)
@@ -233,11 +235,6 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerPrefix(lexer.TokDefined, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokRef, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokScalarKw, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokKeys, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokValues, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokEach, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokExists, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokDelete, p.parseBuiltinCall)
 
 	// Array/Hash builtins
 	p.registerPrefix(lexer.TokShift, p.parseBuiltinCall)
@@ -252,8 +249,7 @@ func New(l *lexer.Lexer) *Parser {
 	p.registerPrefix(lexer.TokDelete, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokSort, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokReverse, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokMap, p.parseBuiltinCall)
-	p.registerPrefix(lexer.TokGrep, p.parseBuiltinCall)
+
 	p.registerPrefix(lexer.TokJoin, p.parseBuiltinCall)
 	p.registerPrefix(lexer.TokSplit, p.parseBuiltinCall)
 

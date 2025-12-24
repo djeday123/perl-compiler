@@ -165,6 +165,22 @@ func NewHashRef() *SV {
 	return NewRef(hv)
 }
 
+// NewArraySV creates a new array (not a reference)
+func NewArraySV(elements ...*SV) *SV {
+	av := &SV{
+		typ:    TypeArray,
+		refcnt: 1,
+		av:     make([]*SV, len(elements)),
+	}
+	for i, el := range elements {
+		if el != nil {
+			el.IncRef()
+		}
+		av.av[i] = el
+	}
+	return av
+}
+
 // ============================================================
 // Reference Counting
 // ============================================================

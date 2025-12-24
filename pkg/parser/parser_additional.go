@@ -641,3 +641,76 @@ func (p *Parser) isBareword() bool {
 		return false
 	}
 }
+
+// parseBlockAsAnonSub парсит { block } как AnonSubExpr
+func (p *Parser) parseBlockAsAnonSub() ast.Expression {
+	tok := p.curToken // должен быть {
+
+	if !p.curTokenIs(lexer.TokLBrace) {
+		return nil
+	}
+
+	body := p.parseBlockStmt()
+
+	return &ast.AnonSubExpr{
+		Token:  tok,
+		Params: nil,
+		Body:   body,
+	}
+}
+
+// ============================================================
+// Также добавить новую функцию parseGrepMap для обработки
+// grep { block } @arr и map { block } @arr синтаксиса:
+// ============================================================
+
+func (p *Parser) parseGrepMap() ast.Expression {
+	tok := p.curToken
+	funcName := tok.Value // "grep" или "map"
+
+	call := &ast.CallExpr{
+		Token:    tok,
+		Function: &ast.Identifier{Token: tok, Value: funcName},
+		Args:     []ast.Expression{},
+	}
+
+	// Проверяем следующий токен (peek, не next!)
+	if p.peekTokenIs(lexer.TokLBrace) {
+		// grep { ... } @arr или map { ... } @arr
+		p.nextToken() // переходим на {
+
+		// Парсим блок как анонимную функцию
+		block := p.parseBlockAsAnonSub()
+		call.Args = append(call.Args, block)
+
+		p.nextToken() // переходим с } на @nums
+
+		// После блока ожидаем массив или список
+		// НЕ нужна запятая между блоком и массивом в Perl!
+		if p.curTokenIs(lexer.TokArray) {
+			arr := p.parseExpression(LOWEST)
+			call.Args = append(call.Args, arr)
+		} else if p.curTokenIs(lexer.TokLParen) {
+			// grep { ... } (1, 2, 3)
+			//p.nextToken() // skip (
+			args := p.parseExpressionList(lexer.TokRParen)
+			// Создаём массив из аргументов
+			arrExpr := &ast.ArrayExpr{Token: tok, Elements: args}
+			call.Args = append(call.Args, arrExpr)
+		} else if p.curTokenIs(lexer.TokScalar) {
+			// grep { ... } @$ref - разыменование
+			arr := p.parseExpression(LOWEST)
+			call.Args = append(call.Args, arr)
+		}
+	} else if p.peekTokenIs(lexer.TokLParen) {
+		// grep(EXPR, @arr) - функциональный синтаксис с скобками
+		p.nextToken() // переходим на (
+		call.Args = p.parseExpressionList(lexer.TokRParen)
+	} else {
+		// grep EXPR, @arr - без скобок
+		p.nextToken()
+		call.Args = p.parseListExpression()
+	}
+
+	return call
+}

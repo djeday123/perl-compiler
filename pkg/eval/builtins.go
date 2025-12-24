@@ -2,10 +2,15 @@
 package eval
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"perlc/pkg/ast"
 	"perlc/pkg/av"
@@ -440,4 +445,492 @@ func (i *Interpreter) builtinSetIsa(args []*sv.SV) *sv.SV {
 
 	i.ctx.SetPackageISA(pkg, parents)
 	return sv.NewInt(1)
+}
+
+func (i *Interpreter) builtinIndex(args []*sv.SV) *sv.SV {
+	if len(args) < 2 {
+		return sv.NewInt(-1)
+	}
+	str := args[0].AsString()
+	substr := args[1].AsString()
+
+	// Опциональная начальная позиция
+	start := 0
+	if len(args) >= 3 {
+		start = int(args[2].AsInt())
+		if start < 0 {
+			start = 0
+		}
+		if start > len(str) {
+			return sv.NewInt(-1)
+		}
+	}
+
+	pos := strings.Index(str[start:], substr)
+	if pos == -1 {
+		return sv.NewInt(-1)
+	}
+	return sv.NewInt(int64(pos + start))
+}
+
+// ============================================================
+// rindex - найти позицию подстроки (с конца)
+// ============================================================
+
+func (i *Interpreter) builtinRindex(args []*sv.SV) *sv.SV {
+	if len(args) < 2 {
+		return sv.NewInt(-1)
+	}
+	str := args[0].AsString()
+	substr := args[1].AsString()
+
+	// Опциональная позиция (до которой искать)
+	end := len(str)
+	if len(args) >= 3 {
+		end = int(args[2].AsInt()) + len(substr)
+		if end > len(str) {
+			end = len(str)
+		}
+		if end < 0 {
+			return sv.NewInt(-1)
+		}
+	}
+
+	pos := strings.LastIndex(str[:end], substr)
+	return sv.NewInt(int64(pos))
+}
+
+// ============================================================
+// lcfirst - первая буква в нижний регистр
+// ============================================================
+
+func (i *Interpreter) builtinLcfirst(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewString("")
+	}
+	str := args[0].AsString()
+	if len(str) == 0 {
+		return sv.NewString("")
+	}
+	runes := []rune(str)
+	runes[0] = unicode.ToLower(runes[0])
+	return sv.NewString(string(runes))
+}
+
+// ============================================================
+// ucfirst - первая буква в верхний регистр
+// ============================================================
+
+func (i *Interpreter) builtinUcfirst(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewString("")
+	}
+	str := args[0].AsString()
+	if len(str) == 0 {
+		return sv.NewString("")
+	}
+	runes := []rune(str)
+	runes[0] = unicode.ToUpper(runes[0])
+	return sv.NewString(string(runes))
+}
+
+// ============================================================
+// chop - удалить последний символ
+// ============================================================
+
+func (i *Interpreter) builtinChop(exprs []ast.Expression) *sv.SV {
+	if len(exprs) == 0 {
+		return sv.NewString("")
+	}
+
+	var lastChar string
+	for _, expr := range exprs {
+		if v, ok := expr.(*ast.ScalarVar); ok {
+			val := i.ctx.GetVar(v.Name)
+			s := val.AsString()
+			if len(s) > 0 {
+				runes := []rune(s)
+				lastChar = string(runes[len(runes)-1])
+				s = string(runes[:len(runes)-1])
+				i.ctx.SetVar(v.Name, sv.NewString(s))
+			}
+		}
+	}
+	return sv.NewString(lastChar)
+}
+
+// ============================================================
+// sprintf - форматированная строка
+// ============================================================
+
+func (i *Interpreter) builtinSprintf(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewString("")
+	}
+
+	format := args[0].AsString()
+
+	// Конвертируем аргументы в interface{} для fmt.Sprintf
+	// Используем AsString для всех аргументов, Go сам разберётся с форматом
+	// Но для %d/%i/%x нужны числа, для %f/%e/%g нужны float
+	fmtArgs := make([]interface{}, len(args)-1)
+
+	// Простой подход: парсим формат и выбираем тип
+	fmtIdx := 0
+	for idx, arg := range args[1:] {
+		// Находим следующий % в формате
+		for fmtIdx < len(format) {
+			if format[fmtIdx] == '%' {
+				fmtIdx++
+				if fmtIdx < len(format) && format[fmtIdx] == '%' {
+					fmtIdx++
+					continue // %%
+				}
+				// Пропускаем флаги и ширину
+				for fmtIdx < len(format) {
+					c := format[fmtIdx]
+					if c == '-' || c == '+' || c == ' ' || c == '#' || c == '0' ||
+						(c >= '0' && c <= '9') || c == '.' || c == '*' {
+						fmtIdx++
+					} else {
+						break
+					}
+				}
+				// Смотрим спецификатор
+				if fmtIdx < len(format) {
+					spec := format[fmtIdx]
+					fmtIdx++
+					switch spec {
+					case 'd', 'i', 'o', 'x', 'X', 'b', 'c':
+						fmtArgs[idx] = arg.AsInt()
+					case 'e', 'E', 'f', 'F', 'g', 'G':
+						fmtArgs[idx] = arg.AsFloat()
+					default: // 's', 'v', etc.
+						fmtArgs[idx] = arg.AsString()
+					}
+					break
+				}
+			} else {
+				fmtIdx++
+			}
+		}
+		// Если формат закончился, используем строку
+		if fmtArgs[idx] == nil {
+			fmtArgs[idx] = arg.AsString()
+		}
+	}
+
+	result := fmt.Sprintf(format, fmtArgs...)
+	return sv.NewString(result)
+}
+
+// ============================================================
+// quotemeta - экранирование метасимволов regex
+// ============================================================
+
+func (i *Interpreter) builtinQuotemeta(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewString("")
+	}
+	str := args[0].AsString()
+	return sv.NewString(regexp.QuoteMeta(str))
+}
+
+// ============================================================
+// hex - hex строка в число
+// ============================================================
+
+func (i *Interpreter) builtinHex(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewInt(0)
+	}
+	str := args[0].AsString()
+	// Убираем префикс 0x если есть
+	str = strings.TrimPrefix(str, "0x")
+	str = strings.TrimPrefix(str, "0X")
+
+	val, err := strconv.ParseInt(str, 16, 64)
+	if err != nil {
+		return sv.NewInt(0)
+	}
+	return sv.NewInt(val)
+}
+
+// ============================================================
+// oct - octal/hex/binary строка в число
+// ============================================================
+
+func (i *Interpreter) builtinOct(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewInt(0)
+	}
+	str := strings.TrimSpace(args[0].AsString())
+
+	// Определяем базу по префиксу
+	var val int64
+	var err error
+
+	if strings.HasPrefix(str, "0x") || strings.HasPrefix(str, "0X") {
+		val, err = strconv.ParseInt(str[2:], 16, 64)
+	} else if strings.HasPrefix(str, "0b") || strings.HasPrefix(str, "0B") {
+		val, err = strconv.ParseInt(str[2:], 2, 64)
+	} else if strings.HasPrefix(str, "0") && len(str) > 1 {
+		val, err = strconv.ParseInt(str[1:], 8, 64)
+	} else {
+		val, err = strconv.ParseInt(str, 8, 64)
+	}
+
+	if err != nil {
+		return sv.NewInt(0)
+	}
+	return sv.NewInt(val)
+}
+
+// ============================================================
+// fc - Unicode fold case (для сравнения без учёта регистра)
+// ============================================================
+
+func (i *Interpreter) builtinFc(args []*sv.SV) *sv.SV {
+	if len(args) == 0 {
+		return sv.NewString("")
+	}
+	str := args[0].AsString()
+	// Go не имеет прямого fold case, используем ToLower
+	return sv.NewString(strings.ToLower(str))
+}
+
+// ============================================================
+// pack - упаковка данных в бинарную строку
+// ============================================================
+
+func (i *Interpreter) builtinPack(args []*sv.SV) *sv.SV {
+	if len(args) < 1 {
+		return sv.NewString("")
+	}
+
+	template := args[0].AsString()
+	values := args[1:]
+
+	var buf bytes.Buffer
+	valIdx := 0
+
+	for idx := 0; idx < len(template); idx++ {
+		if valIdx >= len(values) {
+			break
+		}
+
+		ch := template[idx]
+
+		// Проверяем count
+		count := 1
+		if idx+1 < len(template) {
+			if template[idx+1] >= '0' && template[idx+1] <= '9' {
+				countStr := ""
+				for idx+1 < len(template) && template[idx+1] >= '0' && template[idx+1] <= '9' {
+					idx++
+					countStr += string(template[idx])
+				}
+				count, _ = strconv.Atoi(countStr)
+			} else if template[idx+1] == '*' {
+				idx++
+				count = len(values) - valIdx
+			}
+		}
+
+		for c := 0; c < count && valIdx < len(values); c++ {
+			val := values[valIdx]
+
+			switch ch {
+			case 'A', 'a': // ASCII строка
+				s := val.AsString()
+				buf.WriteString(s)
+				valIdx++
+			case 'Z': // Null-terminated строка
+				s := val.AsString()
+				buf.WriteString(s)
+				buf.WriteByte(0)
+				valIdx++
+			case 'c', 'C': // char
+				buf.WriteByte(byte(val.AsInt()))
+				valIdx++
+			case 's': // signed short (little-endian)
+				binary.Write(&buf, binary.LittleEndian, int16(val.AsInt()))
+				valIdx++
+			case 'S': // unsigned short
+				binary.Write(&buf, binary.LittleEndian, uint16(val.AsInt()))
+				valIdx++
+			case 'l': // signed long
+				binary.Write(&buf, binary.LittleEndian, int32(val.AsInt()))
+				valIdx++
+			case 'L': // unsigned long
+				binary.Write(&buf, binary.LittleEndian, uint32(val.AsInt()))
+				valIdx++
+			case 'q': // signed quad
+				binary.Write(&buf, binary.LittleEndian, val.AsInt())
+				valIdx++
+			case 'Q': // unsigned quad
+				binary.Write(&buf, binary.LittleEndian, uint64(val.AsInt()))
+				valIdx++
+			case 'n': // unsigned short (big-endian)
+				binary.Write(&buf, binary.BigEndian, uint16(val.AsInt()))
+				valIdx++
+			case 'N': // unsigned long (big-endian)
+				binary.Write(&buf, binary.BigEndian, uint32(val.AsInt()))
+				valIdx++
+			case 'f': // float
+				binary.Write(&buf, binary.LittleEndian, float32(val.AsFloat()))
+				valIdx++
+			case 'd': // double
+				binary.Write(&buf, binary.LittleEndian, val.AsFloat())
+				valIdx++
+			case 'H': // hex string
+				s := val.AsString()
+				for j := 0; j < len(s); j += 2 {
+					end := j + 2
+					if end > len(s) {
+						end = len(s)
+					}
+					b, _ := strconv.ParseUint(s[j:end], 16, 8)
+					buf.WriteByte(byte(b))
+				}
+				valIdx++
+			case 'x': // null byte
+				buf.WriteByte(0)
+			}
+		}
+	}
+
+	return sv.NewString(buf.String())
+}
+
+// ============================================================
+// unpack - распаковка бинарной строки
+// ============================================================
+
+func (i *Interpreter) builtinUnpack(args []*sv.SV) *sv.SV {
+	if len(args) < 2 {
+		return sv.NewArrayRef()
+	}
+
+	template := args[0].AsString()
+	data := []byte(args[1].AsString())
+
+	var results []*sv.SV
+	offset := 0
+
+	for idx := 0; idx < len(template); idx++ {
+		if offset >= len(data) {
+			break
+		}
+
+		ch := template[idx]
+
+		// Проверяем count
+		count := 1
+		if idx+1 < len(template) {
+			if template[idx+1] >= '0' && template[idx+1] <= '9' {
+				countStr := ""
+				for idx+1 < len(template) && template[idx+1] >= '0' && template[idx+1] <= '9' {
+					idx++
+					countStr += string(template[idx])
+				}
+				count, _ = strconv.Atoi(countStr)
+			} else if template[idx+1] == '*' {
+				idx++
+				count = len(data) - offset
+			}
+		}
+
+		for c := 0; c < count && offset < len(data); c++ {
+			switch ch {
+			case 'A', 'a': // ASCII строка
+				if count > 1 {
+					end := offset + count
+					if end > len(data) {
+						end = len(data)
+					}
+					results = append(results, sv.NewString(string(data[offset:end])))
+					offset = end
+					c = count
+				} else {
+					results = append(results, sv.NewString(string(data[offset])))
+					offset++
+				}
+			case 'Z': // Null-terminated
+				end := offset
+				for end < len(data) && data[end] != 0 {
+					end++
+				}
+				results = append(results, sv.NewString(string(data[offset:end])))
+				offset = end + 1
+			case 'c': // signed char
+				results = append(results, sv.NewInt(int64(int8(data[offset]))))
+				offset++
+			case 'C': // unsigned char
+				results = append(results, sv.NewInt(int64(data[offset])))
+				offset++
+			case 's': // signed short
+				if offset+2 <= len(data) {
+					val := int16(binary.LittleEndian.Uint16(data[offset:]))
+					results = append(results, sv.NewInt(int64(val)))
+					offset += 2
+				}
+			case 'S': // unsigned short
+				if offset+2 <= len(data) {
+					val := binary.LittleEndian.Uint16(data[offset:])
+					results = append(results, sv.NewInt(int64(val)))
+					offset += 2
+				}
+			case 'l': // signed long
+				if offset+4 <= len(data) {
+					val := int32(binary.LittleEndian.Uint32(data[offset:]))
+					results = append(results, sv.NewInt(int64(val)))
+					offset += 4
+				}
+			case 'L': // unsigned long
+				if offset+4 <= len(data) {
+					val := binary.LittleEndian.Uint32(data[offset:])
+					results = append(results, sv.NewInt(int64(val)))
+					offset += 4
+				}
+			case 'n': // unsigned short (big-endian)
+				if offset+2 <= len(data) {
+					val := binary.BigEndian.Uint16(data[offset:])
+					results = append(results, sv.NewInt(int64(val)))
+					offset += 2
+				}
+			case 'N': // unsigned long (big-endian)
+				if offset+4 <= len(data) {
+					val := binary.BigEndian.Uint32(data[offset:])
+					results = append(results, sv.NewInt(int64(val)))
+					offset += 4
+				}
+			case 'H': // hex string
+				if count > 1 {
+					end := offset + (count+1)/2
+					if end > len(data) {
+						end = len(data)
+					}
+					var hex strings.Builder
+					for j := offset; j < end; j++ {
+						hex.WriteString(fmt.Sprintf("%02X", data[j]))
+					}
+					s := hex.String()
+					if len(s) > count {
+						s = s[:count]
+					}
+					results = append(results, sv.NewString(s))
+					offset = end
+					c = count
+				} else {
+					results = append(results, sv.NewString(fmt.Sprintf("%X", data[offset]>>4)))
+					offset++
+				}
+			case 'x': // skip byte
+				offset++
+			}
+		}
+	}
+
+	return sv.NewArrayRef(results...)
 }
